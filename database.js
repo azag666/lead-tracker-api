@@ -1,11 +1,11 @@
-const { Pool } = require('pg');
+// Importa a função 'neon' do driver serverless.
+const { neon } = require('@neondatabase/serverless');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
+// A URL de conexão será pega diretamente das variáveis de ambiente da Vercel.
+const sql = neon(process.env.DATABASE_URL);
 
 // A única função que exportamos é a de executar uma query.
-// A conexão só será usada quando esta função for chamada.
+// Ela usa a função 'sql' importada do driver da Neon.
 module.exports = {
-  query: (text, params) => pool.query(text, params),
+  query: (text, params) => sql(text, params),
 };
