@@ -1,25 +1,14 @@
 {
   "name": "lead-tracker-api",
   "version": "1.0.0",
-  "description": "API para captação de leads e registro em banco de dados.",
+  "description": "API para captação de leads.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "keywords": [
-    "api",
-    "leads",
-    "nodejs",
-    "express",
-    "postgresql"
-  ],
-  "author": "Seu Nome",
-  "license": "MIT",
   "dependencies": {
     "@neondatabase/serverless": "^0.9.4",
-    "axios": "^1.7.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2"
   }
 }
