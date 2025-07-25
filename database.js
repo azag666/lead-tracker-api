@@ -1,21 +1,22 @@
 const { Pool } = require('pg');
 
+// Configuração simplificada para Vercel/Neon
+// A própria connectionString já contém a diretiva de SSL (`?sslmode=require`)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
 });
 
 async function testDbConnection() {
   try {
     await pool.query('SELECT NOW()');
-    console.log('Conexão com o banco de dados PostgreSQL estabelecida com sucesso!');
+    console.log('Conexão com o banco de dados Vercel/Neon estabelecida com sucesso!');
   } catch (err) {
-    console.error('Erro ao conectar ao banco de dados PostgreSQL:', err);
+    console.error('Erro ao conectar ao banco de dados Vercel/Neon:', err);
     process.exit(1);
   }
 }
+
+// O restante do arquivo continua igual...
 
 async function createClicksTable() {
   const query = `
