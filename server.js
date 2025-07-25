@@ -1,45 +1,47 @@
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const db = require('./database'); // Importa nosso novo database.js
+const { neon } = require('@neondatabase/serverless');
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
+// Rota para o Health Check da Vercel
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 // A ÚNICA ROTA DA NOSSA API
 app.post('/api/registerClick', async (req, res) => {
-  const { referer, fbclid, fbp, client_id } = req.body;
-  const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-  const user_agent = req.headers['user-agent'];
-  
-  // Como não temos mais a função de geolocalização, vamos salvar a cidade como vazia
-  const city = ''; 
-  const state = '';
-
   try {
-    const queryText = `
-      INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id)
-      VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)
+    const { referer, fbclid, fbp, client_id } = req.body;
+    const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const user_agent = req.headers['user-agent'];
+
+    // Instancia a conexão com o banco de dados AQUI, dentro da rota.
+    const sql = neon(process.env.DATABASE_URL);
+
+    // Salva o clique inicial e obtém o ID
+    const insertQuery = `
+      INSERT INTO clicks (timestamp, ip_address, user_agent, referer, fbclid, fbp, client_id)
+      VALUES (NOW(), $1, $2, $3, $4, $5, $6)
       RETURNING id;
     `;
-    const values = [ip_address, user_agent, referer, city, state, fbclid, fbp, client_id];
-    
-    const result = await db.query(queryText, values);
-    
-    const generatedId = result.rows[0].id;
-    const formattedClickId = `lead${generatedId.toString().padStart(6, '0')}`;
-    
-    await db.query('UPDATE clicks SET click_id = $1 WHERE id = $2', [formattedClickId, generatedId]);
+    const insertResult = await sql(insertQuery, [ip_address, user_agent, referer, fbclid, fbp, client_id]);
+    const generatedId = insertResult[0].id;
 
-    console.log(`Clique salvo com sucesso! Client_id: [${client_id}], Click_id: [${formattedClickId}]`);
+    // Cria o click_id formatado e atualiza a linha
+    const formattedClickId = `lead${generatedId.toString().padStart(6, '0')}`;
+    await sql('UPDATE clicks SET click_id = $1 WHERE id = $2', [formattedClickId, generatedId]);
+
+    console.log(`Clique salvo! Client_id: [${client_id}], Click_id: [${formattedClickId}]`);
     
+    // Retorna sucesso com o click_id para a pressel
     res.status(200).json({ status: 'success', message: 'Click registrado', click_id: formattedClickId });
 
   } catch (error) {
-    console.error('ERRO AO SALVAR NO BANCO DE DADOS:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor ao salvar o clique.' });
+    console.error('ERRO FATAL NA ROTA /api/registerClick:', error);
+    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
   }
 });
 
