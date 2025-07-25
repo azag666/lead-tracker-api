@@ -6,63 +6,49 @@ const db = require('./database');
 const fs = require('fs');
 const path = require('path');
 
+// --- OTIMIZAÇÃO: LER O ARQUIVO HTML UMA ÚNICA VEZ NA INICIALIZAÇÃO ---
+const presselTemplate = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8');
+// --------------------------------------------------------------------
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middlewares
 app.use(cors());
 app.use(express.json());
 
-// =================================================================
-// NOVA ROTA RAIZ (Health Check para o Railway)
 app.get('/', (req, res) => {
   res.status(200).json({ status: 'ok', message: 'Lead Tracker API is running.' });
 });
-// =================================================================
 
-// Constantes da API de Geolocalização
 const IP_API_BASE_URL = 'http://ip-api.com/json/';
 
-// Função para obter dados de geolocalização (cidade e estado) a partir de um IP
 async function getGeoFromIp(ip) {
   if (!ip) return { city: '', state: '' };
   try {
     const response = await axios.get(`${IP_API_BASE_URL}${ip}?fields=status,message,city,regionName`);
     if (response.data && response.data.status === 'success') {
-      return {
-        city: response.data.city || '',
-        state: response.data.regionName || ''
-      };
+      return { city: response.data.city || '', state: response.data.regionName || '' };
     }
-    console.warn('Não foi possível obter geolocalização do IP:', ip, response.data.message);
     return { city: '', state: '' };
   } catch (error) {
-    console.error('Exceção ao obter geolocalização do IP:', ip, error.message);
     return { city: '', state: '' };
   }
 }
 
-// ROTA 1: Gerar e servir a pressel HTML para um cliente específico
 app.get('/api/getClientPresselHtml/:clientId', async (req, res) => {
   const { clientId } = req.params;
-
   try {
-    // Verifica se o cliente existe no banco de dados
     const clientResult = await db.query('SELECT * FROM saas_clients WHERE client_id = $1', [clientId]);
     if (clientResult.rows.length === 0) {
       return res.status(404).send('Cliente não encontrado.');
     }
     const clientData = clientResult.rows[0];
-
-    // Lê o template da pressel (index.html)
-    const presselTemplate = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8');
     
-    // Injeta dinamicamente os dados do cliente no HTML
+    // --- OTIMIZAÇÃO: USA O TEMPLATE JÁ CARREGADO NA MEMÓRIA ---
     const finalHtml = presselTemplate
       .replace(/INSERIR_CLIENT_ID_AQUI_PELA_API/g, clientId)
       .replace(/INSERIR_TELEGRAM_BOT_AQUI_PELA_API/g, clientData.telegram_bot_username)
       .replace(/INSERIR_PIXEL_ID_AQUI_PELA_API/g, clientData.meta_pixel_id);
-
 
     res.setHeader('Content-Type', 'text/html');
     res.send(finalHtml);
@@ -72,8 +58,8 @@ app.get('/api/getClientPresselHtml/:clientId', async (req, res) => {
   }
 });
 
+// O restante do código permanece o mesmo...
 
-// ROTA 2: Registrar um novo clique (chamada pela pressel)
 app.post('/api/registerClick', async (req, res) => {
   const { referer, fbclid, fbp, client_id } = req.body;
   const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -109,7 +95,6 @@ app.post('/api/registerClick', async (req, res) => {
   }
 });
 
-// ROTA 3: Obter dados do clique para o ManyChat
 app.get('/api/getClickData', async (req, res) => {
   const { click_id } = req.query;
 
@@ -138,7 +123,6 @@ app.get('/api/getClickData', async (req, res) => {
   }
 });
 
-// ROTA 4: Webhook para receber confirmação de PIX e marcar como convertido
 app.post('/api/webhook/paymentConfirmed', async (req, res) => {
     const { click_id, amount, transaction_id } = req.body;
 
@@ -172,7 +156,6 @@ app.post('/api/webhook/paymentConfirmed', async (req, res) => {
 });
 
 
-// Inicializa o servidor
 async function startServer() {
   await db.testDbConnection();
   await db.createSaasClientsTable();
