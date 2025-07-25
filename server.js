@@ -7,12 +7,18 @@ const db = require('./database');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors()); // Essencial para permitir que sua pressel externa acesse a API
+app.use(cors());
 app.use(express.json());
 
-// Rota para o Health Check do Railway
+// ########## ROTA DE HEALTH CHECK ATUALIZADA PARA /health ##########
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'API is healthy and running.' });
+});
+// ##################################################################
+
+// Rota raiz opcional, apenas para dar um feedback no navegador
 app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'Lead Tracker API is running.' });
+    res.send('API está no ar. Use o endpoint /health para verificação de saúde.');
 });
 
 const IP_API_BASE_URL = 'http://ip-api.com/json/';
@@ -30,7 +36,6 @@ async function getGeoFromIp(ip) {
   }
 }
 
-// ROTA PRINCIPAL: Registrar o clique vindo da pressel externa
 app.post('/api/registerClick', async (req, res) => {
   const { referer, fbclid, fbp, client_id } = req.body;
   const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
@@ -54,7 +59,6 @@ app.post('/api/registerClick', async (req, res) => {
     const formattedClickId = `lead${generatedId.toString().padStart(6, '0')}`;
     await db.query('UPDATE clicks SET click_id = $1 WHERE id = $2', [formattedClickId, generatedId]);
     console.log(`Clique recebido da pressel externa. Client_id: [${client_id}], Click_id: [${formattedClickId}]`);
-    // Retorna o click_id para a pressel
     res.json({ status: 'success', message: 'Click registrado', click_id: formattedClickId });
   } catch (error) {
     console.error('Erro ao registrar clique:', error);
@@ -62,8 +66,6 @@ app.post('/api/registerClick', async (req, res) => {
   }
 });
 
-
-// ROTA DE CONSULTA: Para o ManyChat obter dados
 app.get('/api/getClickData', async (req, res) => {
   const { click_id } = req.query;
   if (!click_id) {
@@ -81,7 +83,6 @@ app.get('/api/getClickData', async (req, res) => {
     res.status(500).json({ status: 'error', message: 'Erro interno do servidor' });
   }
 });
-
 
 async function startServer() {
   await db.testDbConnection();
