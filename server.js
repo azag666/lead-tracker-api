@@ -1,169 +1,116 @@
-require('dotenv').config();
+require('dotenv').config(); // Carrega variáveis de ambiente do arquivo .env
 const express = require('express');
-const cors = require('cors');
-const axios = require('axios');
-const db = require('./database');
-const fs = require('fs');
-const path = require('path');
-
-// --- OTIMIZAÇÃO: LER O ARQUIVO HTML UMA ÚNICA VEZ NA INICIALIZAÇÃO ---
-const presselTemplate = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf-8');
-// --------------------------------------------------------------------
+const cors = require('cors'); // Para lidar com Cross-Origin Resource Sharing
+const { v4: uuidv4 } = require('uuid'); // Para gerar CLICK_ID único (não usado para o click_id final, mas útil para outros fins se necessário)
+const axios = require('axios'); // Para fazer requisições HTTP (ex: para ip-api.com)
+const db = require('./database'); // Importa a conexão com o banco de dados
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000; // Porta do servidor, Railway.app fornecerá a PORT
 
+// Middleware para permitir requisições de qualquer origem (CORS)
+// Isso é CRÍTICO para sua pressel poder se comunicar com a API
 app.use(cors());
-app.use(express.json());
+app.use(express.json()); // Middleware para parsear o corpo das requisições como JSON
 
-app.get('/', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'Lead Tracker API is running.' });
-});
-
+// Constantes para a API de geolocalização
 const IP_API_BASE_URL = 'http://ip-api.com/json/';
+const IP_API_KEY = process.env.IP_API_KEY || ''; // Sua chave da API de IP (opcional)
 
-async function getGeoFromIp(ip) {
-  if (!ip) return { city: '', state: '' };
+// Função auxiliar para obter a cidade a partir de um IP
+async function getCityFromIp(ip) {
+  if (!ip) return '';
   try {
-    const response = await axios.get(`${IP_API_BASE_URL}${ip}?fields=status,message,city,regionName`);
-    if (response.data && response.data.status === 'success') {
-      return { city: response.data.city || '', state: response.data.regionName || '' };
+    const response = await axios.get(`${IP_API_BASE_URL}${ip}?fields=city${IP_API_KEY ? '&key=' + IP_API_KEY : ''}`);
+    if (response.data && response.data.status === 'success' && response.data.city) {
+      return response.data.city;
     }
-    return { city: '', state: '' };
+    console.warn('Erro ao obter cidade do IP:', ip, response.data);
+    return '';
   } catch (error) {
-    return { city: '', state: '' };
+    console.error('Exceção ao obter cidade do IP:', ip, error.message);
+    return '';
   }
 }
 
-app.get('/api/getClientPresselHtml/:clientId', async (req, res) => {
-  const { clientId } = req.params;
-  try {
-    const clientResult = await db.query('SELECT * FROM saas_clients WHERE client_id = $1', [clientId]);
-    if (clientResult.rows.length === 0) {
-      return res.status(404).send('Cliente não encontrado.');
-    }
-    const clientData = clientResult.rows[0];
-    
-    // --- OTIMIZAÇÃO: USA O TEMPLATE JÁ CARREGADO NA MEMÓRIA ---
-    const finalHtml = presselTemplate
-      .replace(/INSERIR_CLIENT_ID_AQUI_PELA_API/g, clientId)
-      .replace(/INSERIR_TELEGRAM_BOT_AQUI_PELA_API/g, clientData.telegram_bot_username)
-      .replace(/INSERIR_PIXEL_ID_AQUI_PELA_API/g, clientData.meta_pixel_id);
-
-    res.setHeader('Content-Type', 'text/html');
-    res.send(finalHtml);
-  } catch (error) {
-    console.error('Erro ao gerar pressel para o cliente:', error);
-    res.status(500).send('Erro interno do servidor.');
-  }
-});
-
-// O restante do código permanece o mesmo...
-
+// Rota para registrar um novo clique (chamada pela pressel)
 app.post('/api/registerClick', async (req, res) => {
-  const { referer, fbclid, fbp, client_id } = req.body;
-  const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log('Requisição POST /api/registerClick recebida.');
+  const { referer } = req.body; // Dados enviados pela pressel
+  const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress; // Captura o IP
   const user_agent = req.headers['user-agent'];
   const timestamp = new Date();
 
-  if (!client_id) {
-    return res.status(400).json({ status: 'error', message: 'client_id é obrigatório.' });
-  }
-
   try {
-    const { city, state } = await getGeoFromIp(ip_address);
+    const city = await getCityFromIp(ip_address); // Consulta a cidade
 
+    // Insere os dados e retorna o ID auto-gerado pelo banco de dados
     const query = `
-      INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING id;
+      INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id; -- Retorna o ID auto-gerado
     `;
-    const values = [timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id];
+    const values = [timestamp, ip_address, user_agent, referer, city];
 
     const result = await db.query(query, values);
-    const generatedId = result.rows[0].id;
-    const formattedClickId = `lead${generatedId.toString().padStart(6, '0')}`;
+    const generatedId = result.rows[0].id; // O ID auto-gerado pelo banco
 
-    await db.query('UPDATE clicks SET click_id = $1 WHERE id = $2', [formattedClickId, generatedId]);
+    // Formata o ID para ter no máximo 6 dígitos com zeros à esquerda
+    // Ex: 1 -> "000001", 123 -> "000123"
+    const formattedClickId = generatedId.toString().padStart(6, '0');
 
-    console.log(`Clique registrado para client_id [${client_id}] com click_id [${formattedClickId}]`);
-    res.json({ status: 'success', message: 'Click registrado', click_id: formattedClickId });
+    // Agora, atualiza a linha recém-criada com o click_id formatado
+    const updateQuery = `
+      UPDATE clicks
+      SET click_id = $1
+      WHERE id = $2;
+    `;
+    await db.query(updateQuery, [formattedClickId, generatedId]);
+
+    console.log('Clique registrado no banco de dados com ID:', generatedId, 'e CLICK_ID formatado:', formattedClickId);
+
+    // Retorna o CLICK_ID formatado para a pressel
+    res.json({ status: 'success', message: 'Click registered', click_id: formattedClickId });
 
   } catch (error) {
     console.error('Erro ao registrar clique:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor', details: error.message });
+    res.status(500).json({ status: 'error', message: 'Internal server error', details: error.message });
   }
 });
 
-app.get('/api/getClickData', async (req, res) => {
-  const { click_id } = req.query;
+// Rota para consultar a cidade de um CLICK_ID (chamada pelo ManyChat)
+app.get('/api/getCity', async (req, res) => {
+  console.log('Requisição GET /api/getCity recebida.');
+  const { click_id } = req.query; // CLICK_ID virá como parâmetro de query
 
   if (!click_id) {
-    return res.status(400).json({ status: 'error', message: 'click_id é obrigatório' });
+    return res.status(400).json({ status: 'error', message: 'click_id is required' });
   }
 
   try {
-    const result = await db.query('SELECT city, state, is_converted, conversion_value FROM clicks WHERE click_id = $1', [click_id]);
+    // Busca pelo CLICK_ID formatado
+    const query = 'SELECT city FROM clicks WHERE click_id = $1;';
+    const result = await db.query(query, [click_id]);
 
     if (result.rows.length > 0) {
-      const data = result.rows[0];
-      res.json({
-        status: 'success',
-        city: data.city || 'N/A',
-        state: data.state || 'N/A',
-        is_paid: data.is_converted,
-        value: data.conversion_value || 0
-      });
+      res.json({ status: 'success', city: result.rows[0].city || 'Não encontrada' });
     } else {
-      res.status(404).json({ status: 'error', message: 'Click ID não encontrado' });
+      res.status(404).json({ status: 'error', message: 'Click ID not found' });
     }
   } catch (error) {
-    console.error('Erro ao consultar dados do clique:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor' });
+    console.error('Erro ao consultar cidade:', error);
+    res.status(500).json({ status: 'error', message: 'Internal server error', details: error.message });
   }
 });
 
-app.post('/api/webhook/paymentConfirmed', async (req, res) => {
-    const { click_id, amount, transaction_id } = req.body;
-
-    if (!click_id || !amount) {
-        return res.status(400).json({ status: 'error', message: 'click_id e amount são obrigatórios.' });
-    }
-
-    try {
-        const updateQuery = `
-            UPDATE clicks
-            SET is_converted = TRUE,
-              conversion_timestamp = NOW(),
-              conversion_value = $1,
-              pix_id = $2
-            WHERE click_id = $3 AND is_converted = FALSE
-            RETURNING client_id, fbp, fbc, ip_address, user_agent;
-        `;
-        const result = await db.query(updateQuery, [amount, transaction_id, click_id]);
-
-        if (result.rows.length > 0) {
-            console.log(`Conversão registrada para o click_id: ${click_id}`);
-            res.status(200).json({ status: 'success', message: 'Conversão registrada.' });
-        } else {
-            console.log(`Webhook recebido para click_id já convertido ou não encontrado: ${click_id}`);
-            res.status(202).json({ status: 'ignored', message: 'Clique não encontrado ou já convertido.' });
-        }
-    } catch (error) {
-        console.error('Erro no webhook de pagamento:', error);
-        res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
-    }
-});
-
-
+// Inicializa a conexão com o banco de dados e cria a tabela, depois inicia o servidor
 async function startServer() {
-  await db.testDbConnection();
-  await db.createSaasClientsTable();
-  await db.createClicksTable();
-  
+  await db.testDbConnection(); // Testa a conexão
+  await db.createClicksTable(); // Cria a tabela se não existir
   app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
-    console.log(`URL da pressel (exemplo): /api/getClientPresselHtml/SEU_CLIENT_ID`);
+    console.log(`API_URL para registerClick: http://localhost:${PORT}/api/registerClick`);
+    console.log(`API_URL para getCity: http://localhost:${PORT}/api/getCity?click_id=SEU_CLICK_ID`);
   });
 }
 
