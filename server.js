@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const axios =require('axios');
+const axios = require('axios');
 const db = require('./database');
 const fs = require('fs');
 const path = require('path');
@@ -12,6 +12,13 @@ const PORT = process.env.PORT || 3000;
 // Middlewares
 app.use(cors());
 app.use(express.json());
+
+// =================================================================
+// NOVA ROTA RAIZ (Health Check para o Railway)
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Lead Tracker API is running.' });
+});
+// =================================================================
 
 // Constantes da API de Geolocalização
 const IP_API_BASE_URL = 'http://ip-api.com/json/';
@@ -53,9 +60,8 @@ app.get('/api/getClientPresselHtml/:clientId', async (req, res) => {
     // Injeta dinamicamente os dados do cliente no HTML
     const finalHtml = presselTemplate
       .replace(/INSERIR_CLIENT_ID_AQUI_PELA_API/g, clientId)
-      .replace(/Mariaduds_bot/g, clientData.telegram_bot_username) // Substitui o bot do Telegram
-      .replace(/2157896137958065/g, clientData.meta_pixel_id) // Substitui o ID do Pixel
-      .replace(/762701059469722/g, clientData.meta_pixel_id); // Substitui o segundo ID de Pixel (se houver)
+      .replace(/INSERIR_TELEGRAM_BOT_AQUI_PELA_API/g, clientData.telegram_bot_username)
+      .replace(/INSERIR_PIXEL_ID_AQUI_PELA_API/g, clientData.meta_pixel_id);
 
 
     res.setHeader('Content-Type', 'text/html');
@@ -133,11 +139,7 @@ app.get('/api/getClickData', async (req, res) => {
 });
 
 // ROTA 4: Webhook para receber confirmação de PIX e marcar como convertido
-// (Esta é uma rota de exemplo, você precisará adaptar para o seu gateway de pagamento)
 app.post('/api/webhook/paymentConfirmed', async (req, res) => {
-    // A implementação exata dependerá do formato do webhook do seu gateway (ex: PushinPay)
-    // Geralmente, o webhook envia um ID de transação ou um "metadata" que você associou ao clique.
-    // Vamos supor que você receba o `click_id` e o `valor` no corpo da requisição.
     const { click_id, amount, transaction_id } = req.body;
 
     if (!click_id || !amount) {
@@ -158,11 +160,6 @@ app.post('/api/webhook/paymentConfirmed', async (req, res) => {
 
         if (result.rows.length > 0) {
             console.log(`Conversão registrada para o click_id: ${click_id}`);
-            
-            // LÓGICA PARA ENVIAR EVENTO PARA A META CONVERSIONS API
-            // const conversionData = result.rows[0];
-            // await sendConversionToMeta(conversionData); // Você precisaria criar esta função
-            
             res.status(200).json({ status: 'success', message: 'Conversão registrada.' });
         } else {
             console.log(`Webhook recebido para click_id já convertido ou não encontrado: ${click_id}`);
@@ -178,7 +175,6 @@ app.post('/api/webhook/paymentConfirmed', async (req, res) => {
 // Inicializa o servidor
 async function startServer() {
   await db.testDbConnection();
-  // Garante que AMBAS as tabelas sejam criadas
   await db.createSaasClientsTable();
   await db.createClicksTable();
   
