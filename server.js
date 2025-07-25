@@ -1,96 +1,47 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
-const db = require('./database');
+const db = require('./database'); // Importa nosso novo database.js
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
-// ########## ROTA DE HEALTH CHECK ATUALIZADA PARA /health ##########
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', message: 'API is healthy and running.' });
-});
-// ##################################################################
-
-// Rota raiz opcional, apenas para dar um feedback no navegador
-app.get('/', (req, res) => {
-    res.send('API está no ar. Use o endpoint /health para verificação de saúde.');
-});
-
-const IP_API_BASE_URL = 'http://ip-api.com/json/';
-
-async function getGeoFromIp(ip) {
-  if (!ip) return { city: '', state: '' };
-  try {
-    const response = await axios.get(`${IP_API_BASE_URL}${ip}?fields=status,message,city,regionName`);
-    if (response.data && response.data.status === 'success') {
-      return { city: response.data.city || '', state: response.data.regionName || '' };
-    }
-    return { city: '', state: '' };
-  } catch (error) {
-    return { city: '', state: '' };
-  }
-}
-
+// A ÚNICA ROTA DA NOSSA API
 app.post('/api/registerClick', async (req, res) => {
   const { referer, fbclid, fbp, client_id } = req.body;
   const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
   const user_agent = req.headers['user-agent'];
-  const timestamp = new Date();
-
-  if (!client_id) {
-    return res.status(400).json({ status: 'error', message: 'client_id é obrigatório.' });
-  }
+  
+  // Como não temos mais a função de geolocalização, vamos salvar a cidade como vazia
+  const city = ''; 
+  const state = '';
 
   try {
-    const { city, state } = await getGeoFromIp(ip_address);
-    const query = `
+    const queryText = `
       INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING id;
     `;
-    const values = [timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id];
-    const result = await db.query(query, values);
+    const values = [ip_address, user_agent, referer, city, state, fbclid, fbp, client_id];
+    
+    const result = await db.query(queryText, values);
+    
     const generatedId = result.rows[0].id;
     const formattedClickId = `lead${generatedId.toString().padStart(6, '0')}`;
+    
     await db.query('UPDATE clicks SET click_id = $1 WHERE id = $2', [formattedClickId, generatedId]);
-    console.log(`Clique recebido da pressel externa. Client_id: [${client_id}], Click_id: [${formattedClickId}]`);
-    res.json({ status: 'success', message: 'Click registrado', click_id: formattedClickId });
+
+    console.log(`Clique salvo com sucesso! Client_id: [${client_id}], Click_id: [${formattedClickId}]`);
+    
+    res.status(200).json({ status: 'success', message: 'Click registrado', click_id: formattedClickId });
+
   } catch (error) {
-    console.error('Erro ao registrar clique:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor' });
+    console.error('ERRO AO SALVAR NO BANCO DE DADOS:', error);
+    res.status(500).json({ status: 'error', message: 'Erro interno do servidor ao salvar o clique.' });
   }
 });
 
-app.get('/api/getClickData', async (req, res) => {
-  const { click_id } = req.query;
-  if (!click_id) {
-    return res.status(400).json({ status: 'error', message: 'click_id é obrigatório' });
-  }
-  try {
-    const result = await db.query('SELECT city, state FROM clicks WHERE click_id = $1', [click_id]);
-    if (result.rows.length > 0) {
-      res.json({ status: 'success', city: result.rows[0].city || 'N/A' });
-    } else {
-      res.status(404).json({ status: 'error', message: 'Click ID não encontrado' });
-    }
-  } catch (error) {
-    console.error('Erro ao consultar cidade:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor' });
-  }
-});
-
-async function startServer() {
-  await db.testDbConnection();
-  await db.createSaasClientsTable();
-  await db.createClicksTable();
-  app.listen(PORT, () => {
-    console.log(`API de leads rodando na porta ${PORT}`);
-  });
-}
-
-startServer();
+// Exporta o app para a Vercel
+module.exports = app;
