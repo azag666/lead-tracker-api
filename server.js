@@ -75,27 +75,30 @@ app.post('/api/confirmPayment', async (req, res) => {
   } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
 
-// ########## ROTA /api/getCityByClickId MODIFICADA PARA RETORNAR APENAS O TEXTO DA CIDADE ##########
+// ########## ROTA /api/getCityByClickId REVERTIDA PARA RETORNAR JSON ##########
 app.get('/api/getCityByClickId', async (req, res) => {
   const { click_id } = req.query;
+
   if (!click_id) {
-    return res.status(400).send('O parâmetro click_id é obrigatório.');
+    return res.status(400).json({ status: 'error', message: 'O parâmetro click_id é obrigatório.' });
   }
+
   try {
     const sql = neon(process.env.DATABASE_URL);
+    // Busca apenas a cidade
     const result = await sql('SELECT city FROM clicks WHERE click_id = $1', [click_id]);
 
     if (result.length > 0) {
-      // Retorna a cidade como TEXTO PURO, não mais como JSON
-      res.status(200).send(result[0].city || 'N/A');
+      // Retorna a cidade no formato JSON
+      res.status(200).json({ city: result[0].city || 'N/A' });
     } else {
-      res.status(404).send('Click ID não encontrado.');
+      res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' });
     }
   } catch (error) {
     console.error('ERRO na rota /api/getCityByClickId:', error);
-    res.status(500).send('Erro interno do servidor.');
+    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
   }
 });
-// #########################################################################################
+// ##########################################################################
 
 module.exports = app;
