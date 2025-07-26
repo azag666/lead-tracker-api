@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// (As outras funções como sendConversionToMeta e getGeoFromIp permanecem as mesmas)
+// Função para enviar conversão para a API da Meta
 async function sendConversionToMeta(clickData) {
   if (!clickData.meta_conversion_api_token || !clickData.meta_pixel_id) { return; }
   const eventId = uuidv4();
@@ -27,6 +27,8 @@ async function sendConversionToMeta(clickData) {
     await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
   } catch (error) { console.error('Erro ao enviar evento para a API da Meta:', error.response ? error.response.data : error.message); }
 }
+
+// Função para obter geolocalização por IP
 async function getGeoFromIp(ip) {
   if (!ip) return { city: '', state: '' };
   try {
@@ -36,7 +38,7 @@ async function getGeoFromIp(ip) {
   } catch (error) { return { city: '', state: '' }; }
 }
 
-// (As outras rotas permanecem as mesmas)
+// Rota para registrar o clique inicial
 app.post('/api/registerClick', async (req, res) => {
   try {
     const { referer, fbclid, fbp, client_id } = req.body;
@@ -53,6 +55,8 @@ app.post('/api/registerClick', async (req, res) => {
     res.status(200).json({ status: 'success', message: 'Click registrado', click_id: cleanClickId });
   } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
+
+// Rota para atualizar informações de conversão
 app.post('/api/updateConversion', async (req, res) => {
   const { click_id, pix_id, pix_value } = req.body;
   if (!click_id || !pix_id || pix_value === undefined) { return res.status(400).json({ status: 'error', message: 'Campos obrigatórios faltando.' }); }
@@ -62,6 +66,8 @@ app.post('/api/updateConversion', async (req, res) => {
     if (result.length > 0) { res.status(200).json({ status: 'success', message: 'Dados do PIX registrados.' }); } else { res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' }); }
   } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
+
+// Rota para confirmar pagamento e enviar conversão
 app.post('/api/confirmPayment', async (req, res) => {
   const { click_id } = req.body;
   if (!click_id) { return res.status(400).json({ status: 'error', message: 'O campo click_id é obrigatório.' }); }
@@ -75,9 +81,9 @@ app.post('/api/confirmPayment', async (req, res) => {
   } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
 
-// ########## ROTA /api/getCityByClickId REVERTIDA PARA RETORNAR JSON ##########
+// ROTA GET existente para pegar a cidade por click_id (via query parameter)
 app.get('/api/getCityByClickId', async (req, res) => {
-  const { click_id } = req.query;
+  const { click_id } = req.query; // Pega do query parameter
 
   if (!click_id) {
     return res.status(400).json({ status: 'error', message: 'O parâmetro click_id é obrigatório.' });
@@ -85,20 +91,40 @@ app.get('/api/getCityByClickId', async (req, res) => {
 
   try {
     const sql = neon(process.env.DATABASE_URL);
-    // Busca apenas a cidade
     const result = await sql('SELECT city FROM clicks WHERE click_id = $1', [click_id]);
 
     if (result.length > 0) {
-      // Retorna a cidade no formato JSON
       res.status(200).json({ city: result[0].city || 'N/A' });
     } else {
       res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' });
     }
   } catch (error) {
-    console.error('ERRO na rota /api/getCityByClickId:', error);
+    console.error('ERRO na rota /api/getCityByClickId (GET):', error);
     res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
   }
 });
-// ##########################################################################
+
+// NOVA ROTA POST para pegar a cidade por click_id (via request body)
+app.post('/api/getCityByClickIdPost', async (req, res) => {
+  const { click_id } = req.body; // Pega do corpo da requisição
+
+  if (!click_id) {
+    return res.status(400).json({ status: 'error', message: 'O campo click_id é obrigatório no corpo da requisição.' });
+  }
+
+  try {
+    const sql = neon(process.env.DATABASE_URL);
+    const result = await sql('SELECT city FROM clicks WHERE click_id = $1', [click_id]);
+
+    if (result.length > 0) {
+      res.status(200).json({ city: result[0].city || 'N/A' });
+    } else {
+      res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' });
+    }
+  } catch (error) {
+    console.error('ERRO na rota /api/getCityByClickIdPost (POST):', error);
+    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
+  }
+});
 
 module.exports = app;
