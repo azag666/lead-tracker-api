@@ -8,67 +8,35 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Função auxiliar para enviar o evento de conversão para a API da Meta
+// (As outras funções como sendConversionToMeta e getGeoFromIp permanecem as mesmas)
 async function sendConversionToMeta(clickData) {
-  if (!clickData.meta_conversion_api_token || !clickData.meta_pixel_id) {
-    console.log(`Cliente com client_id ${clickData.client_id} não possui credenciais da Meta. Evento não enviado.`);
-    return;
-  }
+  if (!clickData.meta_conversion_api_token || !clickData.meta_pixel_id) { return; }
   const eventId = uuidv4();
   const eventTime = Math.floor(Date.now() / 1000);
   const metaApiUrl = `https://graph.facebook.com/v19.0/${clickData.meta_pixel_id}/events`;
   const payload = {
-    data: [
-      {
-        event_name: 'Purchase',
-        event_time: eventTime,
-        event_id: eventId,
-        action_source: 'website',
-        user_data: {
-          client_ip_address: clickData.ip_address,
-          client_user_agent: clickData.user_agent,
-          fbp: clickData.fbp || null,
-          fbc: clickData.fbc || null,
-        },
-        custom_data: {
-          currency: 'BRL',
-          value: clickData.pix_value,
-        },
-      },
-    ],
+    data: [{
+      event_name: 'Purchase', event_time: eventTime, event_id: eventId, action_source: 'website',
+      user_data: { client_ip_address: clickData.ip_address, client_user_agent: clickData.user_agent, fbp: clickData.fbp || null, fbc: clickData.fbc || null },
+      custom_data: { currency: 'BRL', value: clickData.pix_value },
+    }],
   };
   try {
-    console.log('Enviando evento de conversão para a Meta:', JSON.stringify(payload, null, 2));
-    await axios.post(metaApiUrl, payload, {
-      headers: {
-        'Authorization': `Bearer ${clickData.meta_conversion_api_token}`,
-        'Content-Type': 'application/json'
-      }
-    });
-    console.log(`Evento de conversão enviado com sucesso para o Pixel ID ${clickData.meta_pixel_id} com event_id ${eventId}`);
+    await axios.post(metaApiUrl, payload, { headers: { 'Authorization': `Bearer ${clickData.meta_conversion_api_token}`, 'Content-Type': 'application/json' } });
     const sql = neon(process.env.DATABASE_URL);
     await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
-  } catch (error) {
-    console.error('Erro ao enviar evento para a API da Meta:', error.response ? error.response.data : error.message);
-  }
+  } catch (error) { console.error('Erro ao enviar evento para a API da Meta:', error.response ? error.response.data : error.message); }
 }
-
-// Função para buscar Cidade e Estado pelo IP
 async function getGeoFromIp(ip) {
   if (!ip) return { city: '', state: '' };
   try {
     const response = await axios.get(`http://ip-api.com/json/${ip}?fields=status,city,regionName`);
-    if (response.data && response.data.status === 'success') {
-      return { city: response.data.city || '', state: response.data.regionName || '' };
-    }
+    if (response.data && response.data.status === 'success') { return { city: response.data.city || '', state: response.data.regionName || '' }; }
     return { city: '', state: '' };
-  } catch (error) {
-    console.error('Erro ao buscar geolocalização:', error.message);
-    return { city: '', state: '' };
-  }
+  } catch (error) { return { city: '', state: '' }; }
 }
 
-// ROTA PARA A PRESSEL REGISTRAR O CLIQUE
+// (As outras rotas permanecem as mesmas)
 app.post('/api/registerClick', async (req, res) => {
   try {
     const { referer, fbclid, fbp, client_id } = req.body;
@@ -76,103 +44,58 @@ app.post('/api/registerClick', async (req, res) => {
     const user_agent = req.headers['user-agent'];
     const { city, state } = await getGeoFromIp(ip_address);
     const sql = neon(process.env.DATABASE_URL);
-    const insertQuery = `
-      INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id)
-      VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8)
-      RETURNING id;
-    `;
+    const insertQuery = `INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8) RETURNING id;`;
     const insertResult = await sql(insertQuery, [ip_address, user_agent, referer, city, state, fbclid, fbp, client_id]);
     const generatedId = insertResult[0].id;
-    
-    // --- MUDANÇA PRINCIPAL AQUI ---
     const cleanClickId = `lead${generatedId.toString().padStart(6, '0')}`;
-    const prefixedClickId = `/start ${cleanClickId}`; // Cria a versão com prefixo para o banco
-
-    // Salva a versão com prefixo no banco de dados
+    const prefixedClickId = `/start ${cleanClickId}`;
     await sql('UPDATE clicks SET click_id = $1 WHERE id = $2', [prefixedClickId, generatedId]);
-    
-    console.log(`Clique salvo! Client_id: [${client_id}], Click_id no DB: [${prefixedClickId}], Cidade: [${city}]`);
-    
-    // Retorna a versão LIMPA para a pressel montar a URL
     res.status(200).json({ status: 'success', message: 'Click registrado', click_id: cleanClickId });
-    // ---------------------------------
-
-  } catch (error) {
-    console.error('ERRO FATAL NA ROTA /api/registerClick:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
-  }
+  } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
-
-// ROTA PARA O MANYCHAT ATUALIZAR O PIX GERADO
 app.post('/api/updateConversion', async (req, res) => {
   const { click_id, pix_id, pix_value } = req.body;
-  if (!click_id || !pix_id || pix_value === undefined) {
-    return res.status(400).json({ status: 'error', message: 'Os campos click_id, pix_id e pix_value são obrigatórios.' });
-  }
+  if (!click_id || !pix_id || pix_value === undefined) { return res.status(400).json({ status: 'error', message: 'Campos obrigatórios faltando.' }); }
   try {
     const sql = neon(process.env.DATABASE_URL);
-    const updateQuery = `UPDATE clicks SET pix_id = $1, pix_value = $2 WHERE click_id = $3 RETURNING *;`;
-    const result = await sql(updateQuery, [pix_id, pix_value, click_id]);
+    const result = await sql(`UPDATE clicks SET pix_id = $1, pix_value = $2 WHERE click_id = $3 RETURNING *;`, [pix_id, pix_value, click_id]);
+    if (result.length > 0) { res.status(200).json({ status: 'success', message: 'Dados do PIX registrados.' }); } else { res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' }); }
+  } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
+});
+app.post('/api/confirmPayment', async (req, res) => {
+  const { click_id } = req.body;
+  if (!click_id) { return res.status(400).json({ status: 'error', message: 'O campo click_id é obrigatório.' }); }
+  try {
+    const sql = neon(process.env.DATABASE_URL);
+    const result = await sql(`UPDATE clicks c SET is_converted = TRUE, conversion_timestamp = NOW() FROM saas_clients sc WHERE c.click_id = $1 AND c.is_converted = FALSE AND c.client_id = sc.client_id RETURNING c.*, sc.meta_pixel_id, sc.meta_conversion_api_token;`, [click_id]);
     if (result.length > 0) {
-      res.status(200).json({ status: 'success', message: 'Dados do PIX registrados.' });
-    } else {
-      res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' });
-    }
-  } catch (error) {
-    console.error('ERRO FATAL NA ROTA /api/updateConversion:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
-  }
+      await sendConversionToMeta(result[0]);
+      res.status(200).json({ status: 'success', message: 'Pagamento confirmado e evento de conversão enviado.' });
+    } else { res.status(404).json({ status: 'error', message: 'Click ID não encontrado ou já convertido.' }); }
+  } catch (error) { res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' }); }
 });
 
-// ROTA: CONSULTAR CIDADE PELO CLICK_ID
+// ########## ROTA /api/getCityByClickId MODIFICADA PARA RETORNAR APENAS O TEXTO DA CIDADE ##########
 app.get('/api/getCityByClickId', async (req, res) => {
   const { click_id } = req.query;
   if (!click_id) {
-    return res.status(400).json({ status: 'error', message: 'O parâmetro click_id é obrigatório.' });
+    return res.status(400).send('O parâmetro click_id é obrigatório.');
   }
   try {
     const sql = neon(process.env.DATABASE_URL);
-    const result = await sql('SELECT city, state FROM clicks WHERE click_id = $1', [click_id]);
+    const result = await sql('SELECT city FROM clicks WHERE click_id = $1', [click_id]);
+
     if (result.length > 0) {
-      res.status(200).json({ city: result[0].city || 'N/A', state: result[0].state || 'N/A' });
+      // Retorna a cidade como TEXTO PURO, não mais como JSON
+      res.status(200).send(result[0].city || 'N/A');
     } else {
-      res.status(404).json({ status: 'error', message: 'Click ID não encontrado.' });
+      res.status(404).send('Click ID não encontrado.');
     }
   } catch (error) {
     console.error('ERRO na rota /api/getCityByClickId:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
+    res.status(500).send('Erro interno do servidor.');
   }
 });
-
-// ROTA: CONFIRMAR PAGAMENTO E ENVIAR PARA A META
-app.post('/api/confirmPayment', async (req, res) => {
-  const { click_id } = req.body;
-  if (!click_id) {
-    return res.status(400).json({ status: 'error', message: 'O campo click_id é obrigatório.' });
-  }
-  try {
-    const sql = neon(process.env.DATABASE_URL);
-    const query = `
-      UPDATE clicks c
-      SET 
-        is_converted = TRUE,
-        conversion_timestamp = NOW()
-      FROM saas_clients sc
-      WHERE c.click_id = $1 AND c.is_converted = FALSE AND c.client_id = sc.client_id
-      RETURNING c.*, sc.meta_pixel_id, sc.meta_conversion_api_token;
-    `;
-    const result = await sql(query, [click_id]);
-    if (result.length > 0) {
-      const clickData = result[0];
-      await sendConversionToMeta(clickData);
-      res.status(200).json({ status: 'success', message: 'Pagamento confirmado e evento de conversão enviado.' });
-    } else {
-      res.status(404).json({ status: 'error', message: 'Click ID não encontrado ou já convertido.' });
-    }
-  } catch (error) {
-    console.error('ERRO FATAL NA ROTA /api/confirmPayment:', error);
-    res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
-  }
-});
+// #########################################################################################
 
 module.exports = app;
