@@ -13,13 +13,12 @@ async function sendConversionToMeta(clickData) {
   console.log('--- Início da Função: sendConversionToMeta ---');
   console.log('Dados de clique recebidos em sendConversionToMeta:', clickData);
 
-  // PIXEL ID E TOKEN DA API DA META FIXOS NO CÓDIGO
+  // PIXEL ID E NOVO TOKEN DA API DA META FIXOS NO CÓDIGO
   const metaPixelId = '762701059469722';
-  const metaConversionApiToken = 'EAAWTsVwbMfYBPGhgkt1u4SbnAqx3ckNdGNT8UIGYXn8RyNZBAmuASX87os096O6lhhP8FtUj7ZBHxNa9b51eOOB5ZAdl3eGRExfl1NcOa2Gguvk5etYfZBOn7gD6b4fntcuI8xcZAbppJWotN9jX7MUGjNnwZDZD';
+  const metaConversionApiToken = 'EAAWTsVwbMfYBPPjhcTGkm1hvdO8MZAxuHgwkHuzZAm45IV240SK1lPt32aiTwcZC9drINWQzPZCqKBnKLAKQI9yevpLijwZBN71cPWJsSSNyBKl99uVo7HqUxLZBB2sHE7sgvg6StVFg5o8d41CiBnLcjUHczOtA3qxvkDWENn1wvXBoJwHVrCPGbKewD1lcTiswZDZD'; // NOVO TOKEN AQUI
 
   if (!metaConversionApiToken || !metaPixelId) {
     console.warn('sendConversionToMeta: Token ou Pixel ID da Meta fixos ausentes. Pulando envio.');
-    // Isso não deve acontecer se os valores estão hardcoded, mas é uma segurança.
     return;
   }
 
@@ -58,24 +57,18 @@ async function sendConversionToMeta(clickData) {
     console.log('Resposta da Meta API (Sucesso):', metaResponse.data);
 
     const sql = neon(process.env.DATABASE_URL);
-    // Atualiza o event_id na tabela clicks
-    // clickData.id é o ID interno do clique no seu DB, não o click_id externo
     await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
     console.log('event_id atualizado no BD após sucesso da Meta API.');
 
   } catch (error) { 
     console.error('ERRO ao enviar evento para a API da Meta:', error);
     if (error.response) {
-      // O erro veio da resposta HTTP da Meta
       console.error('Detalhes da Resposta de Erro da Meta API (status, data):', error.response.status, error.response.data);
     } else if (error.request) {
-      // A requisição foi feita, mas não houve resposta
       console.error('Nenhuma resposta recebida da Meta API:', error.request);
     } else {
-      // Algo aconteceu na configuração da requisição que disparou um erro
       console.error('Erro na configuração da requisição para Meta API:', error.message);
     }
-    // Re-lança o erro para que a rota confirmPayment possa capturá-lo
     throw error; 
   }
   console.log('--- Fim da Função: sendConversionToMeta ---');
@@ -112,7 +105,7 @@ app.post('/api/registerClick', async (req, res) => {
 // Rota para atualizar informações de conversão
 app.post('/api/updateConversion', async (req, res) => {
   const { click_id, pix_id, pix_value } = req.body;
-  console.log('--- Início da Requisição: /api/updateConversion ---'); // Novo log de início
+  console.log('--- Início da Requisição: /api/updateConversion ---');
   console.log('Dados recebidos em /api/updateConversion:', { click_id, pix_id, pix_value });
 
   if (!click_id || !pix_id || pix_value === undefined) {
@@ -134,7 +127,7 @@ app.post('/api/updateConversion', async (req, res) => {
     if (error.stack) console.error('Stack Trace:', error.stack);
     res.status(500).json({ status: 'error', message: 'Erro interno do servidor.' });
   }
-  console.log('--- Fim da Requisição: /api/updateConversion ---'); // Novo log de fim
+  console.log('--- Fim da Requisição: /api/updateConversion ---');
 });
 
 // Rota para confirmar pagamento e enviar conversão
@@ -150,9 +143,6 @@ app.post('/api/confirmPayment', async (req, res) => {
 
   try {
     const sql = neon(process.env.DATABASE_URL);
-    // Busque todos os dados do clique necessários para sendConversionToMeta
-    // ATENÇÃO: A query foi simplificada para não depender de 'saas_clients'.
-    // Ela agora busca todos os dados da linha 'clicks' para o click_id fornecido.
     const clickDataResult = await sql(`
       SELECT 
         id, ip_address, user_agent, fbp, fbc, pix_value, client_id, is_converted, click_id
@@ -169,13 +159,11 @@ app.post('/api/confirmPayment', async (req, res) => {
 
     const clickData = clickDataResult[0];
 
-    // Verifica se já foi convertido para evitar reprocessamento
     if (clickData.is_converted) {
       console.warn('Click ID já foi convertido. Pulando atualização e envio para Meta. Click ID:', click_id);
       return res.status(200).json({ status: 'success', message: 'Pagamento já confirmado anteriormente.' });
     }
 
-    // Atualize o status de conversão APENAS se a busca acima foi bem-sucedida e não foi convertido
     await sql(`
       UPDATE clicks 
       SET is_converted = TRUE, conversion_timestamp = NOW() 
@@ -183,13 +171,11 @@ app.post('/api/confirmPayment', async (req, res) => {
     `, [click_id]);
     console.log('Pagamento confirmado no BD para click_id:', click_id);
       
-    // Chama a função para enviar para a Meta API com os dados do clique
     await sendConversionToMeta(clickData); 
     
     console.log('Evento de conversão Meta enviado (ou tentado) para click_id:', click_id);
     res.status(200).json({ status: 'success', message: 'Pagamento confirmado e evento de conversão enviado.' });
   } catch (error) {
-    // Este catch agora pegará erros tanto do SQL quanto da sendConversionToMeta
     console.error('ERRO INTERNO 500 na rota /api/confirmPayment:', error);
     if (error.stack) {
       console.error('Stack Trace do Erro 500:', error.stack);
