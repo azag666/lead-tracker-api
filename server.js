@@ -18,7 +18,7 @@ const META_PIXELS = [
   },
   { // NOVO PIXEL E TOKEN
     id: '727268736839000',
-    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmC4H2VAYfdkWhFDcFE4Hv4wvumTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD'
+    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD' // TOKEN CORRIGIDO
   }
 ];
 // ##########################################################################
@@ -43,22 +43,33 @@ async function sendConversionToMeta(clickData) {
     const eventTime = Math.floor(Date.now() / 1000);
     const metaApiUrl = `https://graph.facebook.com/v19.0/${metaPixelId}/events`;
     
+    // Mapeia os dados do clickData para o payload da Meta
+    const user_data_payload = { 
+      client_ip_address: clickData.ip_address, 
+      client_user_agent: clickData.user_agent, 
+      fbp: clickData.fbp || null, 
+      fbc: clickData.fbc || null,
+      ct: clickData.city ? clickData.city.toLowerCase() : null, // Cidade (convertida para minúsculas)
+      st: clickData.state ? clickData.state.toLowerCase() : null, // Estado (convertido para minúsculas)
+      // Usando click_id como external_id para o usuário
+      external_id: clickData.click_id || null 
+    };
+
+    const custom_data_payload = { 
+      currency: 'BRL', 
+      value: clickData.pix_value, // Garante que pix_value é um número aqui
+      // O click_id também pode ser enviado aqui como um ID de transação customizado, se necessário
+      // transaction_id: clickData.click_id 
+    };
+
     const payload = {
       data: [{
         event_name: 'Purchase', 
         event_time: eventTime, 
         event_id: eventId, 
         action_source: 'website',
-        user_data: { 
-          client_ip_address: clickData.ip_address, 
-          client_user_agent: clickData.user_agent, 
-          fbp: clickData.fbp || null, 
-          fbc: clickData.fbc || null 
-        },
-        custom_data: { 
-          currency: 'BRL', 
-          value: clickData.pix_value // Garante que pix_value é um número aqui
-        },
+        user_data: user_data_payload,
+        custom_data: custom_data_payload,
       }],
     };
 
@@ -73,10 +84,6 @@ async function sendConversionToMeta(clickData) {
       });
       console.log(`Resposta da Meta API (Sucesso para Pixel ${metaPixelId}):`, metaResponse.data);
 
-      // Atualiza o event_id no BD APENAS para o primeiro pixel ou se você tiver uma estratégia de múltiplos event_ids
-      // Por simplicidade, vamos atualizar o event_id no BD com o ID do primeiro pixel que enviar com sucesso.
-      // Se precisar de rastreamento por pixel, a tabela 'clicks' precisaria de colunas para cada pixel ou uma tabela separada.
-      // Por enquanto, vamos atualizar o event_id do clique com o ID do evento do pixel atual.
       await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
       console.log(`event_id atualizado no BD para click_id ${clickData.id} com ID do evento do Pixel ${metaPixelId}.`);
 
@@ -89,8 +96,6 @@ async function sendConversionToMeta(clickData) {
       } else {
         console.error(`Erro na configuração da requisição para Meta API (Pixel ${metaPixelId}):`, error.message);
       }
-      // Não re-lança o erro aqui para que a tentativa de envio para outros pixels continue.
-      // A rota confirmPayment ainda terá seu próprio catch para erros maiores.
     }
   } // Fim do loop for...of
   console.log('--- Fim da Função: sendConversionToMeta ---');
@@ -112,6 +117,7 @@ app.post('/api/registerClick', async (req, res) => {
     const { referer, fbclid, fbp, client_id } = req.body;
     const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const user_agent = req.headers['user-agent'];
+    // Certifique-se que city e state são capturados e salvos no BD por esta rota
     const { city, state } = await getGeoFromIp(ip_address);
     const sql = neon(process.env.DATABASE_URL);
     const insertQuery = `INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8) RETURNING id;`;
@@ -167,7 +173,7 @@ app.post('/api/confirmPayment', async (req, res) => {
     const sql = neon(process.env.DATABASE_URL);
     const clickDataResult = await sql(`
       SELECT 
-        id, ip_address, user_agent, fbp, fbc, pix_value, client_id, is_converted, click_id
+        id, ip_address, user_agent, fbp, fbc, pix_value, client_id, is_converted, click_id, city, state
       FROM clicks c
       WHERE c.click_id = $1;
     `, [click_id]);
@@ -193,7 +199,6 @@ app.post('/api/confirmPayment', async (req, res) => {
     `, [click_id]);
     console.log('Pagamento confirmado no BD para click_id:', click_id);
       
-    // Chama a função para enviar para a Meta API (agora ela itera pelos pixels)
     await sendConversionToMeta(clickData); 
     
     console.log('Evento de conversão Meta enviado (ou tentado) para click_id:', click_id);
