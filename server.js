@@ -8,69 +8,91 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ##########################################################################
+// #################### CONFIGURAÇÃO DOS PIXELS META ####################
+// ##########################################################################
+const META_PIXELS = [
+  {
+    id: '762701059469722',
+    token: 'EAAWTsVwbMfYBPPjhcTGkm1hvdO8MZAxuHgwkHuzZAm45IV240SK1lPt32aiTwcZC9drINWQzPZCqKBnKLAKQI9yevpLijwZBN71cPWJsSSNyBKl99uVo7HqUxLZBB2sHE7sgvg6StVFg5o8d41CiBnLcjUHczOtA3qxvkDWENn1wvXBoJwHVrCPGbKewD1lcTiswZDZD'
+  },
+  { // NOVO PIXEL E TOKEN
+    id: '727268736839000',
+    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmC4H2VAYfdkWhFDcFE4Hv4wvumTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD'
+  }
+];
+// ##########################################################################
+
 // Função para enviar conversão para a API da Meta
 async function sendConversionToMeta(clickData) {
   console.log('--- Início da Função: sendConversionToMeta ---');
   console.log('Dados de clique recebidos em sendConversionToMeta:', clickData);
 
-  // PIXEL ID E NOVO TOKEN DA API DA META FIXOS NO CÓDIGO
-  const metaPixelId = '762701059469722';
-  const metaConversionApiToken = 'EAAWTsVwbMfYBPPjhcTGkm1hvdO8MZAxuHgwkHuzZAm45IV240SK1lPt32aiTwcZC9drINWQzPZCqKBnKLAKQI9yevpLijwZBN71cPWJsSSNyBKl99uVo7HqUxLZBB2sHE7sgvg6StVFg5o8d41CiBnLcjUHczOtA3qxvkDWENn1wvXBoJwHVrCPGbKewD1lcTiswZDZD'; // NOVO TOKEN AQUI
+  const sql = neon(process.env.DATABASE_URL); // Conexão SQL para atualizar event_id
 
-  if (!metaConversionApiToken || !metaPixelId) {
-    console.warn('sendConversionToMeta: Token ou Pixel ID da Meta fixos ausentes. Pulando envio.');
-    return;
-  }
+  // Itera sobre cada Pixel configurado e tenta enviar o evento
+  for (const pixelConfig of META_PIXELS) {
+    const { id: metaPixelId, token: metaConversionApiToken } = pixelConfig;
 
-  const eventId = uuidv4();
-  const eventTime = Math.floor(Date.now() / 1000);
-  const metaApiUrl = `https://graph.facebook.com/v19.0/${metaPixelId}/events`;
-  
-  const payload = {
-    data: [{
-      event_name: 'Purchase', 
-      event_time: eventTime, 
-      event_id: eventId, 
-      action_source: 'website',
-      user_data: { 
-        client_ip_address: clickData.ip_address, 
-        client_user_agent: clickData.user_agent, 
-        fbp: clickData.fbp || null, 
-        fbc: clickData.fbc || null 
-      },
-      custom_data: { 
-        currency: 'BRL', 
-        value: clickData.pix_value // Garante que pix_value é um número aqui
-      },
-    }],
-  };
-
-  console.log('Payload para Meta API:', JSON.stringify(payload, null, 2));
-
-  try {
-    const metaResponse = await axios.post(metaApiUrl, payload, { 
-      headers: { 
-        'Authorization': `Bearer ${metaConversionApiToken}`, 
-        'Content-Type': 'application/json' 
-      } 
-    });
-    console.log('Resposta da Meta API (Sucesso):', metaResponse.data);
-
-    const sql = neon(process.env.DATABASE_URL);
-    await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
-    console.log('event_id atualizado no BD após sucesso da Meta API.');
-
-  } catch (error) { 
-    console.error('ERRO ao enviar evento para a API da Meta:', error);
-    if (error.response) {
-      console.error('Detalhes da Resposta de Erro da Meta API (status, data):', error.response.status, error.response.data);
-    } else if (error.request) {
-      console.error('Nenhuma resposta recebida da Meta API:', error.request);
-    } else {
-      console.error('Erro na configuração da requisição para Meta API:', error.message);
+    if (!metaConversionApiToken || !metaPixelId) {
+      console.warn(`sendConversionToMeta: Token ou Pixel ID (${metaPixelId}) da Meta ausentes. Pulando envio para este pixel.`);
+      continue; // Pula para o próximo pixel se as credenciais estiverem faltando
     }
-    throw error; 
-  }
+
+    const eventId = uuidv4();
+    const eventTime = Math.floor(Date.now() / 1000);
+    const metaApiUrl = `https://graph.facebook.com/v19.0/${metaPixelId}/events`;
+    
+    const payload = {
+      data: [{
+        event_name: 'Purchase', 
+        event_time: eventTime, 
+        event_id: eventId, 
+        action_source: 'website',
+        user_data: { 
+          client_ip_address: clickData.ip_address, 
+          client_user_agent: clickData.user_agent, 
+          fbp: clickData.fbp || null, 
+          fbc: clickData.fbc || null 
+        },
+        custom_data: { 
+          currency: 'BRL', 
+          value: clickData.pix_value // Garante que pix_value é um número aqui
+        },
+      }],
+    };
+
+    console.log(`Payload para Meta API (Pixel ${metaPixelId}):`, JSON.stringify(payload, null, 2));
+
+    try {
+      const metaResponse = await axios.post(metaApiUrl, payload, { 
+        headers: { 
+          'Authorization': `Bearer ${metaConversionApiToken}`, 
+          'Content-Type': 'application/json' 
+        } 
+      });
+      console.log(`Resposta da Meta API (Sucesso para Pixel ${metaPixelId}):`, metaResponse.data);
+
+      // Atualiza o event_id no BD APENAS para o primeiro pixel ou se você tiver uma estratégia de múltiplos event_ids
+      // Por simplicidade, vamos atualizar o event_id no BD com o ID do primeiro pixel que enviar com sucesso.
+      // Se precisar de rastreamento por pixel, a tabela 'clicks' precisaria de colunas para cada pixel ou uma tabela separada.
+      // Por enquanto, vamos atualizar o event_id do clique com o ID do evento do pixel atual.
+      await sql('UPDATE clicks SET event_id = $1 WHERE id = $2', [eventId, clickData.id]);
+      console.log(`event_id atualizado no BD para click_id ${clickData.id} com ID do evento do Pixel ${metaPixelId}.`);
+
+    } catch (error) { 
+      console.error(`ERRO ao enviar evento para a API da Meta (Pixel ${metaPixelId}):`, error);
+      if (error.response) {
+        console.error('Detalhes da Resposta de Erro da Meta API (status, data):', error.response.status, error.response.data);
+      } else if (error.request) {
+        console.error(`Nenhuma resposta recebida da Meta API (Pixel ${metaPixelId}):`, error.request);
+      } else {
+        console.error(`Erro na configuração da requisição para Meta API (Pixel ${metaPixelId}):`, error.message);
+      }
+      // Não re-lança o erro aqui para que a tentativa de envio para outros pixels continue.
+      // A rota confirmPayment ainda terá seu próprio catch para erros maiores.
+    }
+  } // Fim do loop for...of
   console.log('--- Fim da Função: sendConversionToMeta ---');
 }
 
@@ -171,6 +193,7 @@ app.post('/api/confirmPayment', async (req, res) => {
     `, [click_id]);
     console.log('Pagamento confirmado no BD para click_id:', click_id);
       
+    // Chama a função para enviar para a Meta API (agora ela itera pelos pixels)
     await sendConversionToMeta(clickData); 
     
     console.log('Evento de conversão Meta enviado (ou tentado) para click_id:', click_id);
