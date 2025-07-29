@@ -3,10 +3,17 @@ const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
 const axios = require('axios');
 const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto'); // Importa o módulo crypto para hashing
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Função auxiliar para hashear strings com SHA256
+function sha256(value) {
+  if (!value) return null;
+  return crypto.createHash('sha256').update(value.trim().toLowerCase()).digest('hex');
+}
 
 // ##########################################################################
 // #################### CONFIGURAÇÃO DOS PIXELS META ####################
@@ -16,9 +23,9 @@ const META_PIXELS = [
     id: '762701059469722',
     token: 'EAAWTsVwbMfYBPPjhcTGkm1hvdO8MZAxuHgwkHuzZAm45IV240SK1lPt32aiTwcZC9drINWQzPZCqKBnKLAKQI9yevpLijwZBN71cPWJsSSNyBKl99uVo7HqUxLZBB2sHE7sgvg6StVFg5o8d41CiBnLcjUHczOtA3qxvkDWENn1wvXBoJwHVrCPGbKewD1lcTiswZDZD'
   },
-  { // NOVO PIXEL E TOKEN
+  { // NOVO PIXEL E TOKEN - POR FAVOR, GERE UM NOVO TOKEN PARA ESTE PIXEL!
     id: '727268736839000',
-    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD' // TOKEN CORRIGIDO
+    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD' // TOKEN ATUALMENTE MALFORMADO
   }
 ];
 // ##########################################################################
@@ -49,17 +56,15 @@ async function sendConversionToMeta(clickData) {
       client_user_agent: clickData.user_agent, 
       fbp: clickData.fbp || null, 
       fbc: clickData.fbc || null,
-      ct: clickData.city ? clickData.city.toLowerCase() : null, // Cidade (convertida para minúsculas)
-      st: clickData.state ? clickData.state.toLowerCase() : null, // Estado (convertido para minúsculas)
-      // Usando click_id como external_id para o usuário
-      external_id: clickData.click_id || null 
+      // NOVOS CAMPOS ADICIONADOS E AGORA HASHADOS:
+      ct: sha256(clickData.city), // Cidade (hasheada)
+      st: sha256(clickData.state), // Estado (hasheado)
+      external_id: clickData.click_id || null // click_id como external_id
     };
 
     const custom_data_payload = { 
       currency: 'BRL', 
       value: clickData.pix_value, // Garante que pix_value é um número aqui
-      // O click_id também pode ser enviado aqui como um ID de transação customizado, se necessário
-      // transaction_id: clickData.click_id 
     };
 
     const payload = {
