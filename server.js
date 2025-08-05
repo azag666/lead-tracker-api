@@ -23,9 +23,13 @@ const META_PIXELS = [
     id: '762701059469722',
     token: 'EAAWTsVwbMfYBPPjhcTGkm1hvdO8MZAxuHgwkHuzZAm45IV240SK1lPt32aiTwcZC9drINWQzPZCqKBnKLAKQI9yevpLijwZBN71cPWJsSSNyBKl99uVo7HqUxLZBB2sHE7sgvg6StVFg5o8d41CiBnLcjUHczOtA3qxvkDWENn1wvXBoJwHVrCPGbKewD1lcTiswZDZD'
   },
-  { // NOVO PIXEL E TOKEN - POR FAVOR, GERE UM NOVO TOKEN PARA ESTE PIXEL!
+  {
     id: '727268736839000',
-    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD' // TOKEN ATUALMENTE MALFORMADO
+    token: 'EAAKLFPhZBVN8BPCTRjZCRgZCGeVnZACc6AZCk9R4qsZC0Tb64PX5fqol3sTFg3BWJwE9IWtLZCZCTVRc57opsiK9sBZBAeJTjvxmTJRXaAP77KU6Tm4t2ywpBh3a7ZCcPcb8ZALgGUzFCYGcCZCfUo09x0yN24KcOCZA9ZBeEvhdIZCdihXQZDZD'
+  },
+  { // NOVO PIXEL ADICIONADO
+    id: '1817379038816925',
+    token: 'EAAI3IK8rZBG4BPE6fMihUzZCefPig38YzIQq4DCZATASBpfapGrDS07a0TAHO0qQ9PW98ZALXFqcHf0FiRowdLmYW1NUePESyX3uON95K5MrKWJY4wr9CJahIbUn4xbuGu7XFFybWkOufIrZCTpcoZAs3jTWm9d9zW6YQlZCtKeofspsJg0tEeYrfL2cf3jxwZDZD'
   }
 ];
 // ##########################################################################
@@ -56,15 +60,14 @@ async function sendConversionToMeta(clickData) {
       client_user_agent: clickData.user_agent, 
       fbp: clickData.fbp || null, 
       fbc: clickData.fbc || null,
-      // NOVOS CAMPOS ADICIONADOS E AGORA HASHADOS:
-      ct: sha256(clickData.city), // Cidade (hasheada)
-      st: sha256(clickData.state), // Estado (hasheado)
-      external_id: clickData.click_id || null // click_id como external_id
+      ct: sha256(clickData.city),
+      st: sha256(clickData.state),
+      external_id: clickData.click_id || null
     };
 
     const custom_data_payload = { 
       currency: 'BRL', 
-      value: clickData.pix_value, // Garante que pix_value é um número aqui
+      value: clickData.pix_value,
     };
 
     const payload = {
@@ -122,7 +125,6 @@ app.post('/api/registerClick', async (req, res) => {
     const { referer, fbclid, fbp, client_id } = req.body;
     const ip_address = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
     const user_agent = req.headers['user-agent'];
-    // Certifique-se que city e state são capturados e salvos no BD por esta rota
     const { city, state } = await getGeoFromIp(ip_address);
     const sql = neon(process.env.DATABASE_URL);
     const insertQuery = `INSERT INTO clicks (timestamp, ip_address, user_agent, referer, city, state, fbclid, fbp, client_id) VALUES (NOW(), $1, $2, $3, $4, $5, $6, $7, $8) RETURNING id;`;
