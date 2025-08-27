@@ -84,18 +84,24 @@ app.post('/api/sellers/login', async (req, res) => {
     try {
         const sellerResult = await sql`SELECT * FROM sellers WHERE email = ${email}`;
         if (sellerResult.length === 0) return res.status(404).json({ message: 'Usuário não encontrado.' });
+        
         const seller = sellerResult[0];
+        
         if (!seller.is_active) {
             return res.status(403).json({ message: 'Este usuário está bloqueado.' });
         }
+        
         const isPasswordCorrect = await bcrypt.compare(password, seller.password_hash);
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
+        
         const tokenPayload = { id: seller.id, email: seller.email };
-        const token = jwt.sign(tokenPayload, JWT_SECRET, { expiresIn: '1d' });
+        const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
+        
         const { password_hash, ...sellerData } = seller;
         res.status(200).json({ message: 'Login bem-sucedido!', token, seller: sellerData });
+
     } catch (error) {
-        console.error("Erro no login:", error);
+        console.error("ERRO DETALHADO NO LOGIN:", error); 
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
@@ -356,6 +362,7 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
+
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -516,7 +523,6 @@ app.post('/api/pix/check-status', async (req, res) => {
     }
 });
 
-// ROTA DE TESTE DE PIX
 app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
