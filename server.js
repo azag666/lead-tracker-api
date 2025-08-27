@@ -40,7 +40,7 @@ async function authenticateJwt(req, res, next) {
 async function logApiRequest(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
-        return next(); // Pula se não houver API Key
+        return next();
     }
     
     try {
@@ -50,14 +50,13 @@ async function logApiRequest(req, res, next) {
         if (sellerResult.length > 0) {
             const sellerId = sellerResult[0].id;
             const endpoint = req.path;
-            // Insere o log no banco de dados sem bloquear a requisição principal
             sql`INSERT INTO api_requests (seller_id, endpoint) VALUES (${sellerId}, ${endpoint})`.catch(err => console.error("Falha ao logar requisição:", err));
         }
     } catch (error) {
         console.error("Erro no middleware de log:", error);
     }
     
-    next(); // Continua para a lógica da rota
+    next();
 }
 
 // --- ROTAS DE AUTENTICAÇÃO ---
@@ -137,6 +136,7 @@ app.post('/api/pixels', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o pixel.' });
     }
 });
+
 app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -147,6 +147,7 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o pixel.' });
     }
 });
+
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_name, bot_token } = req.body;
@@ -160,6 +161,7 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
 });
+
 app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -170,6 +172,7 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o bot.' });
     }
 });
+
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
@@ -197,6 +200,7 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar a pressel.' });
     }
 });
+
 app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -389,7 +393,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
         const click_id_internal = click.id;
 
-        let pixData, providerName;
+        let pixData;
         
         if (seller.active_pix_provider === 'cnpay' || seller.active_pix_provider === 'oasyfy') {
             const isCnpay = seller.active_pix_provider === 'cnpay';
@@ -397,7 +401,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
             const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
             const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
-            providerName = isCnpay ? 'cnpay' : 'oasyfy';
+            const providerName = isCnpay ? 'cnpay' : 'oasyfy';
 
             if (!publicKey || !secretKey) return res.status(400).json({ message: `Credenciais da ${providerName.toUpperCase()} não configuradas.` });
             
@@ -424,7 +428,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixData.pix.code}, ${pixData.pix.base64}, ${providerName}, ${pixData.transactionId})`;
 
         } else { // Padrão é PushinPay
-            providerName = 'pushinpay';
             if (!seller.pushinpay_token) return res.status(400).json({ message: 'Token da PushinPay não configurado.' });
             
             let pushinpaySplitRules = [];
@@ -510,6 +513,54 @@ app.post('/api/pix/check-status', async (req, res) => {
     } catch (error) {
         console.error("Erro ao consultar status do PIX:", error);
         res.status(500).json({ message: 'Erro interno ao consultar status.' });
+    }
+});
+
+// ROTA DE TESTE DE PIX
+app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const sellerId = req.user.id;
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+
+        const provider = seller.active_pix_provider || 'pushinpay';
+        const value_cents = 1; 
+        let pixData;
+
+        console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
+
+        if (provider === 'cnpay' || provider === 'oasyfy') {
+            const isCnpay = provider === 'cnpay';
+            const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+            const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+            if (!publicKey || !secretKey) return res.status(400).json({ message: `Credenciais para ${provider.toUpperCase()} não configuradas.` });
+
+            const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
+            const payload = {
+                identifier: `test-${uuidv4()}`,
+                amount: value_cents / 100,
+                client: { name: "Teste HotTrack", email: "teste@hottrack.com", document: "11111111111", phone: "(11) 99999-9999" },
+            };
+            const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
+            pixData = response.data;
+        } else { // Padrão é PushinPay
+            if (!seller.pushinpay_token) return res.status(400).json({ message: 'Token da PushinPay não configurado.' });
+            
+            const payload = { value: value_cents, webhook_url: `https://${req.headers.host}/api/webhook/pushinpay` };
+            const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+            pixData = pushinpayResponse.data;
+        }
+
+        res.status(200).json({
+            provider: provider.toUpperCase(),
+            qr_code_base64: pixData.qr_code_base64 || pixData.pix.base64
+        });
+
+    } catch (error) {
+        console.error(`[PIX TEST ERROR] Seller ID: ${sellerId} - Erro:`, error.response?.data || error.message);
+        res.status(500).json({ message: 'Falha ao gerar PIX de teste. Verifique suas credenciais.', details: error.response?.data || error.message });
     }
 });
 
@@ -657,16 +708,13 @@ async function sendConversionToMeta(clickData, pixData) {
 // --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
-    console.log('Iniciando verificação de transações pendentes...');
     try {
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '24 hours'`;
 
-        if (pendingTransactions.length === 0) {
-            console.log('Nenhuma transação pendente para verificar.');
-            return;
-        }
+        if (pendingTransactions.length === 0) return;
+        
         for (const tx of pendingTransactions) {
             try {
                 const [seller] = await sql`
@@ -690,7 +738,6 @@ async function checkPendingTransactions() {
                     const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${tx.id} AND status != 'paid' RETURNING *`;
                     if (updatedTx) {
                         await handleSuccessfulPayment(updatedTx.click_id_internal);
-                        console.log(`Transação ${tx.id} atualizada para 'paid' pela rotina.`);
                     }
                 }
             } catch (error) {
@@ -699,8 +746,6 @@ async function checkPendingTransactions() {
         }
     } catch (error) {
         console.error("Erro na rotina de verificação geral:", error.message);
-    } finally {
-        console.log('Verificação de transações concluída.');
     }
 }
 setInterval(checkPendingTransactions, 120000);
@@ -814,7 +859,6 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
     }
 });
 
-// ROTA DE ANÁLISE DE USO
 app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
