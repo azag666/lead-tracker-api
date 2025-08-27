@@ -18,19 +18,17 @@ function getDbConnection() {
 }
 
 // --- CONFIGURAÇÃO ---
-// REMOVEMOS A CONSTANTE JWT_SECRET DAQUI PARA LER DIRETAMENTE DO process.env
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// --- MIDDLEWARE DE AUTENTICAÇÃO (MODIFICADO) ---
+// --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
-    // Lendo a variável de ambiente diretamente aqui
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             console.error("Erro na verificação do JWT:", err.message);
@@ -44,7 +42,9 @@ async function authenticateJwt(req, res, next) {
 // --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
 async function logApiRequest(req, res, next) {
     const apiKey = req.headers['x-api-key'];
-    if (!apiKey) return next();
+    if (!apiKey) {
+        return next();
+    }
     
     try {
         const sql = getDbConnection();
@@ -62,7 +62,7 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
-// --- ROTAS DE AUTENTICAÇÃO (LOGIN MODIFICADO) ---
+// --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -98,7 +98,6 @@ app.post('/api/sellers/login', async (req, res) => {
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
         
         const tokenPayload = { id: seller.id, email: seller.email };
-        // Lendo a variável de ambiente diretamente aqui
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
         
         const { password_hash, ...sellerData } = seller;
@@ -110,10 +109,6 @@ app.post('/api/sellers/login', async (req, res) => {
     }
 });
 
-// --- DEMAIS ROTAS (sem alterações, omitidas para brevidade) ---
-
-// ... (cole aqui o restante do seu arquivo server.js, das rotas de dashboard em diante)
-// ... O código abaixo é o restante do arquivo para facilitar
 // --- ROTA DE DADOS DO PAINEL ---
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -540,7 +535,7 @@ app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
 
         const provider = seller.active_pix_provider || 'pushinpay';
-        const value_cents = 1; 
+        const value_cents = 50; // CORRIGIDO
         let pixData;
 
         console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
