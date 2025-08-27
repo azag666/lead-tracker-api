@@ -29,6 +29,7 @@ async function authenticateJwt(req, res, next) {
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
+    // Lendo a variável de ambiente diretamente aqui para evitar cache
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             console.error("Erro na verificação do JWT:", err.message);
@@ -93,6 +94,7 @@ app.post('/api/sellers/login', async (req, res) => {
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
         
         const tokenPayload = { id: seller.id, email: seller.email };
+        // Lendo a variável de ambiente diretamente aqui para evitar cache
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
         
         const { password_hash, ...sellerData } = seller;
@@ -109,7 +111,7 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, active_pix_provider, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids
@@ -219,15 +221,20 @@ app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
 // --- ROTAS DE CONFIGURAÇÃO ---
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    const { active_pix_provider, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key } = req.body;
+    const { 
+        pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
+        pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
+    } = req.body;
     try {
         await sql`UPDATE sellers SET 
-            active_pix_provider = ${active_pix_provider}, 
             pushinpay_token = ${pushinpay_token || null}, 
             cnpay_public_key = ${cnpay_public_key || null}, 
             cnpay_secret_key = ${cnpay_secret_key || null}, 
             oasyfy_public_key = ${oasyfy_public_key || null}, 
-            oasyfy_secret_key = ${oasyfy_secret_key || null} 
+            oasyfy_secret_key = ${oasyfy_secret_key || null},
+            pix_provider_primary = ${pix_provider_primary || 'pushinpay'},
+            pix_provider_secondary = ${pix_provider_secondary || null},
+            pix_provider_tertiary = ${pix_provider_tertiary || null}
             WHERE id = ${req.user.id}`;
         res.status(200).json({ message: 'Configurações de PIX salvas com sucesso.' });
     } catch (error) {
