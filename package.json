@@ -1,7 +1,7 @@
 {
-  "name": "lead-tracker-api",
-  "version": "1.0.0",
-  "description": "API para captação de leads.",
+  "name": "hottrack-saas-api",
+  "version": "2.0.0",
+  "description": "API SAAS para tracking de leads e conversões.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,8 +9,10 @@
   "dependencies": {
     "@neondatabase/serverless": "^0.9.4",
     "axios": "^1.7.2",
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
     "uuid": "^10.0.0"
   }
 }
