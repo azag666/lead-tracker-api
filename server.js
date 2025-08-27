@@ -29,7 +29,6 @@ async function authenticateJwt(req, res, next) {
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
-    // Lendo a variável de ambiente diretamente aqui para evitar cache
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             console.error("Erro na verificação do JWT:", err.message);
@@ -43,14 +42,10 @@ async function authenticateJwt(req, res, next) {
 // --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
 async function logApiRequest(req, res, next) {
     const apiKey = req.headers['x-api-key'];
-    if (!apiKey) {
-        return next();
-    }
-    
+    if (!apiKey) return next();
     try {
         const sql = getDbConnection();
         const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
-        
         if (sellerResult.length > 0) {
             const sellerId = sellerResult[0].id;
             const endpoint = req.path;
@@ -59,7 +54,6 @@ async function logApiRequest(req, res, next) {
     } catch (error) {
         console.error("Erro no middleware de log:", error);
     }
-    
     next();
 }
 
@@ -99,7 +93,6 @@ app.post('/api/sellers/login', async (req, res) => {
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
         
         const tokenPayload = { id: seller.id, email: seller.email };
-        // Lendo a variável de ambiente diretamente aqui para evitar cache
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
         
         const { password_hash, ...sellerData } = seller;
@@ -298,7 +291,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
     }
 });
 
-app.post('/api/click/info', async (req, res) => {
+app.post('/api/click/info', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
     const { click_id } = req.body;
@@ -552,11 +545,14 @@ app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
         const provider = seller.active_pix_provider || 'pushinpay';
         const value_cents = 50; 
         let pixData;
-
+        let acquirer = 'Não identificado';
+        
         console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
+        const startTime = Date.now();
 
         if (provider === 'cnpay' || provider === 'oasyfy') {
             const isCnpay = provider === 'cnpay';
+            acquirer = isCnpay ? 'CNPay' : 'Oasy.fy';
             const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
             const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
             if (!publicKey || !secretKey) return res.status(400).json({ message: `Credenciais para ${provider.toUpperCase()} não configuradas.` });
@@ -570,16 +566,22 @@ app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
             const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
             pixData = response.data;
         } else { // Padrão é PushinPay
+            acquirer = 'Woovi';
             if (!seller.pushinpay_token) return res.status(400).json({ message: 'Token da PushinPay não configurado.' });
             
             const payload = { value: value_cents, webhook_url: `https://${req.headers.host}/api/webhook/pushinpay` };
             const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
             pixData = pushinpayResponse.data;
         }
+        
+        const endTime = Date.now();
+        const responseTime = ((endTime - startTime) / 1000).toFixed(2);
 
         res.status(200).json({
             provider: provider.toUpperCase(),
-            qr_code_base64: pixData.qr_code_base64 || pixData.pix.base64
+            acquirer: acquirer,
+            responseTime: responseTime,
+            qr_code_text: pixData.qr_code || pixData.pix.code
         });
 
     } catch (error) {
