@@ -23,12 +23,13 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// --- MIDDLEWARE DE AUTENTICAÇÃO ---
+// --- MIDDLEWARE DE AUTENTICAÇÃO (CORRIGIDO) ---
 async function authenticateJwt(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
+    // Lendo a variável de ambiente diretamente aqui para evitar cache
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             console.error("Erro na verificação do JWT:", err.message);
@@ -62,7 +63,7 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
-// --- ROTAS DE AUTENTICAÇÃO ---
+// --- ROTAS DE AUTENTICAÇÃO (CORRIGIDO) ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -98,6 +99,7 @@ app.post('/api/sellers/login', async (req, res) => {
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
         
         const tokenPayload = { id: seller.id, email: seller.email };
+        // Lendo a variável de ambiente diretamente aqui para evitar cache
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
         
         const { password_hash, ...sellerData } = seller;
@@ -301,14 +303,27 @@ app.post('/api/click/info', async (req, res) => {
     const apiKey = req.headers['x-api-key'];
     const { click_id } = req.body;
     if (!apiKey || !click_id) return res.status(400).json({ message: 'API Key e click_id são obrigatórios.' });
+    
     try {
-        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
-        if (sellerResult.length === 0) return res.status(401).json({ message: 'API Key inválida.' });
+        const sellerResult = await sql`SELECT id, email FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
+            console.warn(`[CLICK INFO] Tentativa de consulta com API Key inválida: ${apiKey}`);
+            return res.status(401).json({ message: 'API Key inválida.' });
+        }
+        
         const seller_id = sellerResult[0].id;
+        const seller_email = sellerResult[0].email;
+        
         const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${click_id} AND seller_id = ${seller_id}`;
-        if (clickResult.length === 0) return res.status(404).json({ message: 'Click ID não encontrado para este vendedor.' });
+        
+        if (clickResult.length === 0) {
+            console.warn(`[CLICK INFO NOT FOUND] Vendedor (ID: ${seller_id}, Email: ${seller_email}) tentou consultar o click_id "${click_id}", mas não foi encontrado.`);
+            return res.status(404).json({ message: 'Click ID não encontrado para este vendedor.' });
+        }
+        
         const clickInfo = clickResult[0];
         res.status(200).json({ status: 'success', city: clickInfo.city, state: clickInfo.state });
+
     } catch (error) {
         console.error("Erro ao consultar informações do clique:", error);
         res.status(500).json({ message: 'Erro interno ao consultar informações do clique.' });
@@ -535,7 +550,7 @@ app.post('/api/pix/test-generate', authenticateJwt, async (req, res) => {
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
 
         const provider = seller.active_pix_provider || 'pushinpay';
-        const value_cents = 50; // CORRIGIDO
+        const value_cents = 50; 
         let pixData;
 
         console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
