@@ -182,7 +182,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
             JOIN telegram_bots b ON p.bot_id = b.id
             WHERE p.seller_id = ${sellerId} ORDER BY p.created_at DESC`;
         const botsPromise = sql`SELECT * FROM telegram_bots WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
-        // NOVA PROMISE PARA BUSCAR OS CHECKOUTS
         const checkoutsPromise = sql`
             SELECT c.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids
             FROM checkouts c
@@ -192,7 +191,7 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         const [settingsResult, pixels, pressels, bots, checkouts] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise]);
         
         const settings = settingsResult[0] || {};
-        res.json({ settings, pixels, pressels, bots, checkouts }); // Adiciona checkouts na resposta
+        res.json({ settings, pixels, pressels, bots, checkouts });
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
         res.status(500).json({ message: 'Erro ao buscar dados.' });
@@ -330,7 +329,6 @@ app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- NOVAS ROTAS DE CRUD PARA CHECKOUTS ---
 app.post('/api/checkouts', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
@@ -343,7 +341,7 @@ app.post('/api/checkouts', authenticateJwt, async (req, res) => {
     }
 
     try {
-        await sql`BEGIN`; // Inicia uma transação para garantir a consistência dos dados
+        await sql`BEGIN`;
 
         const [newCheckout] = await sql`
             INSERT INTO checkouts (seller_id, name, product_name, redirect_url, value_type, fixed_value_cents)
@@ -355,11 +353,11 @@ app.post('/api/checkouts', authenticateJwt, async (req, res) => {
             await sql`INSERT INTO checkout_pixels (checkout_id, pixel_config_id) VALUES (${newCheckout.id}, ${pixelId})`;
         }
         
-        await sql`COMMIT`; // Confirma a transação
+        await sql`COMMIT`;
 
         res.status(201).json({ ...newCheckout, pixel_ids: pixel_ids.map(id => parseInt(id)) });
     } catch (error) {
-        await sql`ROLLBACK`; // Desfaz a transação em caso de erro
+        await sql`ROLLBACK`;
         console.error("Erro ao salvar checkout:", error);
         res.status(500).json({ message: 'Erro interno ao salvar o checkout.' });
     }
@@ -375,7 +373,6 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o checkout.' });
     }
 });
-
 
 // --- ROTAS DE CONFIGURAÇÃO ---
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
@@ -416,10 +413,9 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE RASTREAMENTO E CONSULTAS (ATUALIZADA) ---
+// --- ROTA DE RASTREAMENTO E CONSULTAS ---
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
-    // Adicionado 'checkoutId' aos dados recebidos
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
     
     if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
@@ -435,7 +431,6 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
     } catch (e) { console.error("Erro ao buscar geolocalização:", e.message); }
     
     try {
-        // Query de inserção atualizada para incluir 'checkout_id'
         const result = await sql`INSERT INTO clicks (
             seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
@@ -453,9 +448,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
         const db_click_id = `/start ${clean_click_id}`;
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
 
-        // DISPARO DO EVENTO DE INITIATE CHECKOUT
         if (checkoutId) {
-            // Buscamos o valor do produto para enviar no evento, caso seja fixo
             const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
             const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
             
@@ -486,7 +479,8 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
         const seller_id = sellerResult[0].id;
         const seller_email = sellerResult[0].email;
         
-        const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${click_id} AND seller_id = ${seller_id}`;
+        const db_click_id = `/start ${click_id}`;
+        const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
         
         if (clickResult.length === 0) {
             console.warn(`[CLICK INFO NOT FOUND] Vendedor (ID: ${seller_id}, Email: ${seller_email}) tentou consultar o click_id "${click_id}", mas não foi encontrado.`);
@@ -560,12 +554,11 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
-        // Query ajustada para mostrar a origem (Pressel ou Checkout)
         const transactions = await sql`
             SELECT 
                 pt.status, 
                 pt.pix_value, 
-                COALESCE(tb.bot_name, ch.name) as source_name, 
+                COALESCE(tb.bot_name, ch.name, 'Checkout') as source_name, 
                 pt.provider, 
                 pt.created_at
             FROM pix_transactions pt
@@ -582,7 +575,7 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTAS DE GERAÇÃO E CONSULTA DE PIX (COM FALLBACK) ---
+// --- ROTA DE GERAÇÃO DE PIX (CORRIGIDA) ---
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -594,7 +587,8 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
         if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
 
-        const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${click_id} AND seller_id = ${seller.id}`;
+        const db_click_id = `/start ${click_id}`;
+        const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
         
         const providerOrder = [
@@ -611,8 +605,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
                 
                 const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
-                // O evento InitiateCheckout já foi enviado na rota /registerClick para checkouts.
-                // Mantemos aqui para pressels que possam gerar pix direto no futuro.
                 if (click.pressel_id) {
                     await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
                 }
@@ -637,6 +629,42 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 
+// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX
+app.get('/api/pix/status/:transaction_id', async (req, res) => {
+    const sql = getDbConnection();
+    const apiKey = req.headers['x-api-key'];
+    const { transaction_id } = req.params;
+
+    if (!apiKey) return res.status(401).json({ message: 'API Key não fornecida.' });
+    if (!transaction_id) return res.status(400).json({ message: 'ID da transação é obrigatório.' });
+
+    try {
+        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
+            return res.status(401).json({ message: 'API Key inválida.' });
+        }
+        const seller_id = sellerResult[0].id;
+
+        const transactionResult = await sql`
+            SELECT pt.status
+            FROM pix_transactions pt
+            JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id})
+              AND c.seller_id = ${seller_id}`;
+
+        if (transactionResult.length === 0) {
+            return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
+        }
+
+        res.status(200).json({ status: transactionResult[0].status });
+
+    } catch (error) {
+        console.error("Erro ao consultar status da transação:", error);
+        res.status(500).json({ message: 'Erro interno ao consultar o status.' });
+    }
+});
+
+
 // --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -653,11 +681,8 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         
         const value_cents = 50;
         
-        console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
         const startTime = Date.now();
-        
         const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
-        
         const endTime = Date.now();
         const responseTime = ((endTime - startTime) / 1000).toFixed(2);
 
@@ -705,7 +730,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
             const position = providerInfo.position;
             
             try {
-                console.log(`Testando provedor ${position}: ${provider}`);
                 const startTime = Date.now();
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
                 const endTime = Date.now();
@@ -747,7 +771,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (PURCHASE) ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
@@ -762,7 +786,6 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
             const productData = { id: "prod_final", name: "Produto Vendido" };
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
-            // Dispara o evento de Purchase para a Meta
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
         }
     } catch(error) {
@@ -814,7 +837,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
 // --- FUNÇÃO DE ENVIO PARA UTIFY ---
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     if (!sellerData.utmify_api_token) {
-        console.log(`Vendedor ${sellerData.id} não possui token da Utmify configurado.`);
         return;
     }
     const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
@@ -851,12 +873,11 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 
-// --- FUNÇÃO GENÉRICA DE ENVIO PARA META (ATUALIZADA) ---
+// --- FUNÇÃO GENÉRICA DE ENVIO PARA META (CORRIGIDA) ---
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
         let presselPixels = [];
-        // Lógica para buscar os pixels corretos, seja de um pressel ou de um checkout
         if (clickData.pressel_id) {
             presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
         } else if (clickData.checkout_id) {
@@ -880,20 +901,20 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             const nameParts = customerData.name.trim().split(' ');
             const firstName = nameParts[0].toLowerCase();
             const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : undefined;
-            userData.fn = crypto.createHash('sha266').update(firstName).digest('hex');
+            userData.fn = crypto.createHash('sha256').update(firstName).digest('hex');
             if (lastName) {
-                userData.ln = crypto.createHash('sha266').update(lastName).digest('hex');
+                userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
             }
         }
         if (customerData?.document) {
             const cleanedDocument = customerData.document.replace(/\D/g, '');
-             userData.cpf = [crypto.createHash('sha266').update(cleanedDocument).digest('hex')];
+             userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
         }
 
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
-        if (city) userData.ct = crypto.createHash('sha266').update(city).digest('hex');
-        if (state) userData.st = crypto.createHash('sha266').update(state).digest('hex');
+        if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
+        if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
 
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
@@ -916,7 +937,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     }]
                 };
                 
-                // Os eventos InitiateCheckout e ViewContent não devem ter valor.
                 if (eventName !== 'Purchase') {
                     delete payload.data[0].custom_data.value;
                 }
@@ -930,7 +950,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             }
         }
     } catch (error) {
-        console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data || error.message);
+        console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data?.error?.message || error.message);
     }
 }
 
