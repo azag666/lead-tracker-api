@@ -114,7 +114,7 @@ app.post('/api/sellers/login', async (req, res) => {
 });
 
 // --- ROTA DE DADOS DO PAINEL ---
-app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
+app.get('/api/dashboard/data', async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
@@ -493,6 +493,13 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
+    // CORREÇÃO: Adicionado um objeto de cliente mais completo para CNPay e Oasyfy
+    const clientPayload = { 
+        name: "Cliente Teste", 
+        email: "cliente@email.com", 
+        document: "11111111111",
+        phone: "11999999999" // Campo adicionado
+    };
 
     if (provider === 'cnpay') {
         if (!seller.cnpay_public_key || !seller.cnpay_secret_key) throw new Error(`Credenciais para CNPAY não configuradas.`);
@@ -504,7 +511,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const payload = {
             identifier: uuidv4(),
             amount: value_cents / 100,
-            client: { name: "Cliente", email: "cliente@email.com", document: "11111111111" },
+            client: clientPayload,
             splits: splits,
             callbackUrl: `https://${host}/api/webhook/cnpay`
         };
@@ -523,7 +530,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const payload = {
             identifier: uuidv4(),
             amount: value_cents / 100,
-            client: { name: "Cliente", email: "cliente@email.com", document: "11111111111" },
+            client: clientPayload,
             splits: splits,
             callbackUrl: `https://${host}/api/webhook/oasyfy`
         };
@@ -564,8 +571,7 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
         
-        // As credenciais são passadas para a função `generatePixForProvider` que já possui a lógica de verificação.
-        const value_cents = 50; // Valor de 50 centavos para o teste
+        const value_cents = 50;
         
         console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
         const startTime = Date.now();
@@ -590,6 +596,7 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         });
     }
 });
+
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal) {
