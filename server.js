@@ -57,6 +57,63 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
+// --- FUNÇÃO HELPER DE GERAÇÃO DE PIX ---
+async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
+    let pixData;
+    let acquirer = 'Não identificado';
+    const clientPayload = { 
+        name: "Cliente Teste", 
+        email: "cliente@email.com", 
+        document: "11111111111",
+        phone: "11999999999"
+    };
+
+    if (provider === 'cnpay' || provider === 'oasyfy') {
+        const isCnpay = provider === 'cnpay';
+        const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+        const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+        if (!publicKey || !secretKey) throw new Error(`Credenciais para ${provider.toUpperCase()} não configuradas.`);
+
+        const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
+        const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
+        
+        const payload = {
+            identifier: uuidv4(),
+            amount: value_cents / 100,
+            client: clientPayload,
+            callbackUrl: `https://${host}/api/webhook/${provider}`
+        };
+
+        const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
+        if (apiKey !== ADMIN_API_KEY && commission > 0) {
+            payload.splits = [{ producerId: splitId, amount: commission }];
+        }
+
+        const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
+        pixData = response.data;
+        acquirer = isCnpay ? "CNPay" : "Oasy.fy";
+        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
+
+    } else { // Padrão é PushinPay
+        if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
+        const payload = {
+            value: value_cents,
+            webhook_url: `https://${host}/api/webhook/pushinpay`,
+        };
+        
+        const commission_cents = Math.floor(value_cents * 0.0299);
+        if (apiKey !== ADMIN_API_KEY && commission_cents > 0) {
+            payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
+        }
+
+        const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+        pixData = pushinpayResponse.data;
+        acquirer = "Woovi";
+        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer };
+    }
+}
+
+
 // --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
@@ -527,6 +584,7 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         });
     }
 });
+
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal) {
