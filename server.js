@@ -440,58 +440,38 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
         const { startDate, endDate } = req.query;
+        const hasDateFilter = startDate && endDate;
 
-        let dateFilterClause = sql``;
-        if (startDate && endDate) {
-            dateFilterClause = sql`AND c.created_at BETWEEN ${startDate} AND ${endDate}`;
-        }
+        // Versões condicionais das consultas
+        const totalClicksResult = hasDateFilter
+            ? await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
+            : await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId}`;
 
-        const totalClicksResult = await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} ${dateFilterClause}`;
+        const totalPixGeneratedResult = hasDateFilter
+            ? await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
+            : await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId}`;
+
+        const totalPixPaidResult = hasDateFilter
+            ? await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND c.created_at BETWEEN ${startDate} AND ${endDate}`
+            : await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
+
+        const botsPerformance = hasDateFilter
+            ? await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
+            : await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
+
+        const clicksByState = hasDateFilter
+            ? await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
+            : await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
+
+        const dailyRevenue = await sql`SELECT DATE(pt.paid_at) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at) ORDER BY date ASC`;
+
         const totalClicks = totalClicksResult[0].count;
-
-        const baseTransactionQuery = sql`
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE c.seller_id = ${sellerId} ${dateFilterClause}
-        `;
-
-        const totalPixGeneratedResult = await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue ${baseTransactionQuery}`;
         const totalPixGenerated = totalPixGeneratedResult[0].total_pix_generated;
         const totalRevenue = totalPixGeneratedResult[0].total_revenue;
-
-        const totalPixPaidResult = await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue ${baseTransactionQuery} AND pt.status = 'paid'`;
         const totalPixPaid = totalPixPaidResult[0].total_pix_paid;
         const paidRevenue = totalPixPaidResult[0].paid_revenue;
-
         const conversionRate = totalClicks > 0 ? ((totalPixPaid / totalClicks) * 100).toFixed(2) : 0;
         
-        const dailyRevenue = await sql`
-            SELECT 
-                DATE(pt.paid_at) as date, 
-                COALESCE(SUM(pt.pix_value), 0) as revenue
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'
-            GROUP BY DATE(pt.paid_at)
-            ORDER BY date ASC;
-        `;
-
-        const botsPerformance = await sql`
-            SELECT
-                tb.bot_name, COUNT(c.id) AS total_clicks,
-                COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid,
-                COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue
-            FROM telegram_bots tb
-            LEFT JOIN pressels p ON p.bot_id = tb.id
-            LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} ${dateFilterClause}
-            LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id
-            WHERE tb.seller_id = ${sellerId}
-            GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
-
-        const clicksByState = await sql`
-            SELECT c.state, COUNT(c.id) AS total_clicks
-            FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL ${dateFilterClause}
-            GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
-
         res.status(200).json({
             total_clicks: parseInt(totalClicks),
             total_pix_generated: parseInt(totalPixGenerated),
