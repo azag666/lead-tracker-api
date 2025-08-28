@@ -29,7 +29,6 @@ async function authenticateJwt(req, res, next) {
     const token = authHeader && authHeader.split(' ')[1];
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
-    // Lendo a variável de ambiente diretamente aqui para evitar cache
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
         if (err) {
             console.error("Erro na verificação do JWT:", err.message);
@@ -101,7 +100,6 @@ app.post('/api/sellers/login', async (req, res) => {
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
         
         const tokenPayload = { id: seller.id, email: seller.email };
-        // Lendo a variável de ambiente diretamente aqui para evitar cache
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
         
         const { password_hash, ...sellerData } = seller;
@@ -114,7 +112,8 @@ app.post('/api/sellers/login', async (req, res) => {
 });
 
 // --- ROTA DE DADOS DO PAINEL ---
-app.get('/api/dashboard/data', async (req, res) => {
+// CORREÇÃO: Adicionado o middleware authenticateJwt de volta
+app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
@@ -135,6 +134,10 @@ app.get('/api/dashboard/data', async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
+
+// --- ROTAS DE GERENCIAMENTO (CRUD) ---
+// ... (O restante do arquivo permanece o mesmo da versão anterior)
+// ... (O restante do arquivo permanece o mesmo da versão anterior)
 
 // --- ROTAS DE GERENCIAMENTO (CRUD) ---
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
@@ -493,12 +496,11 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
-    // CORREÇÃO: Adicionado um objeto de cliente mais completo para CNPay e Oasyfy
     const clientPayload = { 
         name: "Cliente Teste", 
         email: "cliente@email.com", 
         document: "11111111111",
-        phone: "11999999999" // Campo adicionado
+        phone: "11999999999"
     };
 
     if (provider === 'cnpay') {
