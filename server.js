@@ -280,18 +280,26 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
     if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+    
     try {
         const numeric_bot_id = parseInt(bot_id, 10);
         const numeric_pixel_ids = pixel_ids.map(id => parseInt(id, 10));
+
+        const botResult = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${numeric_bot_id} AND seller_id = ${req.user.id}`;
+        if (botResult.length === 0) {
+            return res.status(404).json({ message: 'Bot não encontrado.' });
+        }
+        const bot_name = botResult[0].bot_name;
+
         await sql`BEGIN`;
         try {
-            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${white_page_url}) RETURNING *;`;
+            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
+            
             for (const pixelId of numeric_pixel_ids) {
                 await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
             }
             await sql`COMMIT`;
-            const botResult = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${numeric_bot_id} AND seller_id = ${req.user.id}`;
-            const bot_name = botResult[0].bot_name;
+            
             res.status(201).json({ ...newPressel, pixel_ids: numeric_pixel_ids, bot_name });
         } catch (transactionError) {
             await sql`ROLLBACK`;
@@ -523,10 +531,9 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             try {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
                 
-                await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
-                // Enviar evento InitiateCheckout para a Meta
-                await sendMetaEvent('InitiateCheckout', click, { pix_value: value_cents / 100 }, null);
+                await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
 
                 const customerDataForUtmify = customer || { name: "Cliente Interessado", email: "cliente@email.com" };
                 const productDataForUtmify = product || { id: "prod_1", name: "Produto Ofertado" };
@@ -796,7 +803,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
 
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
-
+        
         for (const { pixel_config_id } of presselPixels) {
             const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
             if (pixelConfig) {
@@ -816,7 +823,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     }]
                 };
                 
-                // O campo 'value' não é recomendado para InitiateCheckout, então o removemos.
                 if (eventName !== 'Purchase') {
                     delete payload.data[0].custom_data.value;
                 }
