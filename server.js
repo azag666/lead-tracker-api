@@ -1,1027 +1,1180 @@
-const express = require('express');
-const cors = require('cors');
-const { neon } = require('@neondatabase/serverless');
-const { v4: uuidv4 } = require('uuid');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const axios = require('axios');
-const path = require('path');
-const crypto = require('crypto');
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HotTrack SAAS</title>
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#020617"/>
 
-// --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
-function getDbConnection() {
-    return neon(process.env.DATABASE_URL);
-}
-
-// --- CONFIGURAÇÃO ---
-const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
-const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
-const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
-const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-
-// --- MIDDLEWARE DE AUTENTICAÇÃO ---
-async function authenticateJwt(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
-    if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
-    
-    jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) {
-            console.error("Erro na verificação do JWT:", err.message);
-            return res.status(403).json({ message: 'Token inválido ou expirado.' });
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100%22><text y=%22.9em%22 font-size=%2290%22>⚡️</text></svg>">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif; background-color: #020617; color: #e2e8f0;
+            background-image: radial-gradient(circle at 1px 1px, rgba(56, 189, 248, 0.1) 1px, transparent 0);
+            background-size: 20px 20px;
         }
-        req.user = user;
-        next();
-    });
-}
-
-// --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
-async function logApiRequest(req, res, next) {
-    const apiKey = req.headers['x-api-key'];
-    if (!apiKey) return next();
-    try {
-        const sql = getDbConnection();
-        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
-        if (sellerResult.length > 0) {
-            const sellerId = sellerResult[0].id;
-            const endpoint = req.path;
-            sql`INSERT INTO api_requests (seller_id, endpoint) VALUES (${sellerId}, ${endpoint})`.catch(err => console.error("Falha ao logar requisição:", err));
+        .card {
+            background-color: rgba(15, 23, 42, 0.6); border: 1px solid rgba(56, 189, 248, 0.2);
+            backdrop-filter: blur(12px); transition: all 0.3s ease;
         }
-    } catch (error) {
-        console.error("Erro no middleware de log:", error);
-    }
-    next();
-}
+        .form-input, .form-select, .form-date {
+            background-color: rgba(30, 41, 59, 0.5); border: 1px solid #334155; color: #cbd5e1;
+            transition: all 0.3s ease;
+        }
+        .form-input:focus, .form-select:focus, .form-date:focus {
+            outline: none; border-color: #38bdf8;
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.2);
+        }
+        .form-date::-webkit-calendar-picker-indicator {
+            filter: invert(0.6) sepia(1) saturate(5) hue-rotate(180deg);
+        }
+        .btn {
+            background-color: #0ea5e9; color: white; transition: all 0.3s ease;
+            box-shadow: 0 0 10px rgba(14, 165, 233, 0.3), inset 0 0 5px rgba(255, 255, 255, 0.1);
+            border: 1px solid #38bdf8;
+        }
+        .btn:hover {
+            background-color: #38bdf8; box-shadow: 0 0 20px rgba(56, 189, 248, 0.6);
+            transform: translateY(-2px);
+        }
+        .btn:disabled { background-color: #334155; cursor: not-allowed; transform: none; box-shadow: none; }
+        .btn-red { background-color: #7f1d1d; border-color: #b91c1c; box-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
+        .btn-red:hover { background-color: #991b1b; box-shadow: 0 0 20px rgba(239, 68, 68, 0.6); }
+        .btn-green { background-color: #047857; border-color: #059669; box-shadow: 0 0 10px rgba(16, 185, 129, 0.3); }
+        .btn-green:hover { background-color: #059669; box-shadow: 0 0 20px rgba(16, 185, 129, 0.6); }
+        .btn-secondary { background-color: #334155; border-color: #475569; box-shadow: none; }
+        .btn-secondary:hover { background-color: #475569; transform: translateY(-2px); }
+        .btn-filter { background-color: transparent; border: 1px solid #334155; color: #94a3b8; }
+        .btn-filter:hover { background-color: #1e293b; border-color: #38bdf8; color: #e2e8f0; }
+        .btn-filter.active { background-color: rgba(14, 165, 233, 0.1); border-color: #0ea5e9; color: white; font-weight: 600; }
+        .nav-link { color: #94a3b8; border-left: 3px solid transparent; cursor: pointer; transition: all 0.3s ease; }
+        .nav-link:hover { background-color: rgba(56, 189, 248, 0.05); border-left-color: #38bdf8; color: #e2e8f0; }
+        .nav-link.active { background-color: rgba(14, 165, 233, 0.1); border-left-color: #0ea5e9; color: white; font-weight: 600; }
+        .modal { display: none; }
+        .modal.active { display: flex; align-items: center; justify-content: center; position: fixed; z-index: 50; inset: 0; background-color: rgba(0,0,0,0.7); backdrop-filter: blur(8px); }
+        .animate-fade-in { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .table-custom th, .table-custom td { padding: 0.75rem; border-bottom: 1px solid #334155; text-align: left; }
+        .status-indicator { font-size: 0.75rem; font-weight: 500; padding: 0.125rem 0.5rem; border-radius: 9999px; display: inline-block; margin-left: 0.75rem; vertical-align: middle; }
+        .status-indicator.success { background-color: rgba(74, 222, 128, 0.1); color: #4ade80; border: 1px solid rgba(74, 222, 128, 0.2); }
+        .status-indicator.failure { background-color: rgba(248, 113, 113, 0.1); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.2); }
+        .status-indicator.unknown { background-color: rgba(100, 116, 139, 0.1); color: #94a3b8; border: 1px solid rgba(100, 116, 139, 0.2); }
+        .status-indicator.testing { background-color: rgba(56, 189, 248, 0.1); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.2); }
+        .tab-button { background-color: transparent; border: 1px solid #334155; color: #94a3b8; padding: 0.5rem 1rem; border-radius: 0.375rem; transition: all 0.3s ease; }
+        .tab-button:hover { background-color: #1e293b; color: #e2e8f0; }
+        .tab-button.active { background-color: rgba(14, 165, 233, 0.1); border-color: #0ea5e9; color: white; font-weight: 600; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; animation: fadeIn 0.5s ease-out; }
+    </style>
+</head>
+<body>
+    <div id="app"></div>
+    <div id="modal-container"></div>
 
-// --- FUNÇÃO HELPER DE GERAÇÃO DE PIX ---
-async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
-    let pixData;
-    let acquirer = 'Não identificado';
-    const clientPayload = { 
-        name: "Cliente Teste", 
-        email: "cliente@email.com", 
-        document: "11111111111",
-        phone: "11999999999"
+    <script>
+    // --- SCRIPT PARA DESABILITAR INSPEÇÃO ---
+    document.addEventListener('contextmenu', event => event.preventDefault());
+    document.onkeydown = function(e) {
+        if (e.keyCode == 123) { // F12
+            return false;
+        }
+        if (e.ctrlKey && e.shiftKey && e.keyCode == 'I'.charCodeAt(0)) { // Ctrl+Shift+I
+            return false;
+        }
+        if (e.ctrlKey && e.shiftKey && e.keyCode == 'J'.charCodeAt(0)) { // Ctrl+Shift+J
+            return false;
+        }
+        if (e.ctrlKey && e.keyCode == 'U'.charCodeAt(0)) { // Ctrl+U
+            return false;
+        }
     };
 
-    if (provider === 'cnpay' || provider === 'oasyfy') {
-        const isCnpay = provider === 'cnpay';
-        const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
-        const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
-        if (!publicKey || !secretKey) throw new Error(`Credenciais para ${provider.toUpperCase()} não configuradas.`);
+    const App = {
+        state: {
+            API_BASE_URL: 'https://novaapi-one.vercel.app',
+            token: null,
+            data: { 
+                pixels: [], 
+                bots: [], 
+                pressels: [], 
+                settings: {}, 
+                transactions: [],
+                dashboard: {}
+            },
+            currentPage: 'dashboard',
+            dateFilter: {
+                period: 'all',
+                startDate: null,
+                endDate: null
+            },
+            revenueChart: null
+        },
 
-        const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
-        const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
+        async init() {
+            if (window.location.origin.includes('localhost') || window.location.origin.includes('127.0.0.1')) {
+                this.state.API_BASE_URL = 'http://localhost:3000';
+            }
+            this.state.token = localStorage.getItem('hottrack_token');
+            const appContainer = document.getElementById('app');
+            appContainer.innerHTML = `<div class="flex h-screen items-center justify-center"><p>Carregando...</p></div>`;
+            if (this.state.token) {
+                try {
+                    const staticData = await this.apiRequest('/api/dashboard/data');
+                    this.state.data = { ...this.state.data, ...staticData };
+                    this.renderLayout();
+                    this.navigateTo('dashboard');
+                } catch (e) { this.logout(); }
+            } else {
+                this.renderLogin();
+            }
+        },
+
+        renderLogin(page = 'login') {
+            document.getElementById('app').innerHTML = this.templates.auth(page);
+            this.addAuthEventListeners();
+        },
+
+        renderLayout() {
+            document.getElementById('app').innerHTML = this.templates.layout();
+            this.addDashboardEventListeners();
+        },
         
-        const payload = {
-            identifier: uuidv4(),
-            amount: value_cents / 100,
-            client: clientPayload,
-            callbackUrl: `https://${host}/api/webhook/${provider}`
-        };
+        templates: {
+            auth(page = 'login') {
+                return `<div class="flex items-center justify-center min-h-screen p-4"><div id="auth-forms-container" class="w-full max-w-md">${page === 'login' ? this.loginForm() : this.registerForm()}</div></div>`;
+            },
+            loginForm() {
+                return `
+                <div class="card p-8 rounded-2xl shadow-lg animate-fade-in">
+                    <h1 class="text-3xl font-bold text-center text-white">Acessar Plataforma</h1>
+                    <form id="loginForm" class="space-y-6 mt-8">
+                        <div><label class="text-sm font-medium text-gray-400">E-mail</label><input name="email" type="email" required class="form-input w-full p-3 mt-1 rounded-md"></div>
+                        <div><label class="text-sm font-medium text-gray-400">Senha</label><input name="password" type="password" required class="form-input w-full p-3 mt-1 rounded-md"></div>
+                        <button type="submit" class="btn w-full font-semibold py-3 rounded-md">Entrar</button>
+                    </form>
+                    <div class="text-center mt-6"><a href="#" id="showRegister" class="text-sm text-sky-400 hover:text-sky-300">Não tem uma conta? Cadastre-se</a></div>
+                </div>`;
+            },
+            registerForm() {
+                return `
+                <div class="card p-8 rounded-2xl shadow-lg animate-fade-in">
+                    <h1 class="text-3xl font-bold text-center text-white">Criar Conta</h1>
+                    <form id="registerForm" class="space-y-6 mt-8">
+                        <div><label class="text-sm font-medium text-gray-400">Nome</label><input name="name" type="text" required class="form-input w-full p-3 mt-1 rounded-md"></div>
+                        <div><label class="text-sm font-medium text-gray-400">E-mail</label><input name="email" type="email" required class="form-input w-full p-3 mt-1 rounded-md"></div>
+                        <div><label class="text-sm font-medium text-gray-400">Senha</label><input name="password" type="password" required minlength="8" class="form-input w-full p-3 mt-1 rounded-md"></div>
+                        <button type="submit" class="btn w-full font-semibold py-3 rounded-md">Criar Conta</button>
+                    </form>
+                    <div class="text-center mt-6"><a href="#" id="showLogin" class="text-sm text-sky-400 hover:text-sky-300">Já tem uma conta? Faça Login</a></div>
+                </div>`;
+            },
+            layout() {
+                return `
+                <div class="flex h-screen">
+                    <aside class="w-64 card p-4 flex flex-col">
+                        <div class="text-center mb-10 flex items-center justify-center gap-2">
+                            <svg class="h-8 w-8 text-sky-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" /></svg>
+                            <h1 class="text-2xl font-bold text-white">HotTrack</h1>
+                        </div>
+                        <nav id="sidebarNav" class="flex flex-col space-y-2">
+                            <div data-target="dashboard" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M3 10v11h18V10M3 10l9-7 9 7M3 10h18" /></svg>Dashboard</div>
+                            <div data-target="pressels" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>Criador de Pressel</div>
+                            <div data-target="pixels" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6.429 9.75L2.25 12l4.179 2.25m0-4.5l5.571 3 5.571-3m-11.142 0L2.25 12l4.179 2.25M6.429 9.75l5.571 3 5.571-3m0 0l4.179-2.25L12 5.25 7.821 7.5" /></svg>Gerenciar Pixels</div>
+                            <div data-target="bots" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>Gerenciar Bots</div>
+                            <div data-target="transactions" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 8.25h19.5M2.25 9h19.5m-16.5 5.25h6m-6 2.25h3m-3.75 3h15a2.25 2.25 0 0 0 2.25-2.25V6.75A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25v10.5A2.25 2.25 0 0 0 4.5 21Z" /></svg>Transações</div>
+                            <div class="h-px bg-slate-700 my-2"></div>
+                            <div data-target="settings" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 11-3 0m3 0a1.5 1.5 0 10-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 01-3 0m3 0a1.5 1.5 0 00-3 0m-9.75 0h9.75" /></svg>API PIX</div>
+                            <div data-target="integrations" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.19 8.688a4.5 4.5 0 011.242 7.244l-4.5 4.5a4.5 4.5 0 01-6.364-6.364l1.757-1.757m13.35-.622l1.757-1.757a4.5 4.5 0 00-6.364-6.364l-4.5 4.5a4.5 4.5 0 001.242 7.244" /></svg>Integrações</div>
+                            <div data-target="documentation" class="nav-link p-3 rounded-lg flex items-center gap-3"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" /></svg>Documentação</div>
+                        </nav>
+                        <div class="mt-auto"><button id="logoutButton" class="w-full text-gray-400 hover:bg-red-900/50 hover:text-white font-semibold py-2 px-4 rounded-md flex items-center justify-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>Sair</button></div>
+                    </aside>
+                    <main id="content" class="flex-1 p-8 overflow-y-auto"></main>
+                </div>`;
+            },
+            dateFilterComponent(page) {
+                const { period } = App.state.dateFilter;
+                return `
+                <div id="${page}-date-filter" class="card p-4 rounded-lg mb-6 flex flex-wrap items-center gap-2 text-sm">
+                    <span class="font-semibold mr-2">Filtrar por:</span>
+                    <button data-period="today" class="btn-filter py-1 px-3 rounded-md ${period === 'today' ? 'active' : ''}">Hoje</button>
+                    <button data-period="yesterday" class="btn-filter py-1 px-3 rounded-md ${period === 'yesterday' ? 'active' : ''}">Ontem</button>
+                    <button data-period="last7days" class="btn-filter py-1 px-3 rounded-md ${period === 'last7days' ? 'active' : ''}">Últimos 7 dias</button>
+                    <button data-period="thisMonth" class="btn-filter py-1 px-3 rounded-md ${period === 'thisMonth' ? 'active' : ''}">Este Mês</button>
+                    <div class="flex items-center gap-2 pl-4 border-l border-slate-700 ml-2">
+                         <input type="date" id="${page}-start-date" class="form-date p-1 rounded-md text-sm">
+                         <span class="text-gray-500">até</span>
+                         <input type="date" id="${page}-end-date" class="form-date p-1 rounded-md text-sm">
+                         <button id="apply-custom-date-filter-${page}" class="btn-secondary py-1 px-3 rounded-md">Filtrar</button>
+                    </div>
+                    <button id="clear-date-filter-${page}" class="btn-secondary py-1 px-3 rounded-md ml-auto">Limpar</button>
+                </div>`;
+            },
+            dashboard() {
+                return `
+                <div class="animate-fade-in">
+                    <div class="flex justify-between items-center mb-6">
+                        <h1 class="text-3xl font-bold text-white">Painel de Métricas</h1>
+                    </div>
+                    ${this.dateFilterComponent('dashboard')}
+                    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-6 mb-8">
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">Cliques na Página</h3><p id="metric-clicks" class="text-4xl font-bold text-sky-400 mt-2">...</p></div>
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">PIX Gerados</h3><p id="metric-generated" class="text-4xl font-bold text-yellow-400 mt-2">...</p></div>
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">PIX Pagos</h3><p id="metric-paid" class="text-4xl font-bold text-green-400 mt-2">...</p></div>
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">Taxa de Conversão</h3><p id="metric-conversion-rate" class="text-4xl font-bold text-cyan-400 mt-2">...</p></div>
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">Faturamento Pago</h3><p id="metric-paid-revenue" class="text-4xl font-bold text-green-400 mt-2">...</p></div>
+                        <div class="card p-6 rounded-lg text-center"><h3 class="text-sm text-gray-400">Faturamento Total</h3><p id="metric-total-revenue" class="text-4xl font-bold text-sky-400 mt-2">...</p></div>
+                    </div>
+                    <div class="card p-6 rounded-lg mb-8">
+                        <h2 class="text-xl font-semibold text-white mb-4">Desempenho de Faturamento</h2>
+                        <canvas id="revenueChart" height="100"></canvas>
+                    </div>
+                    <div class="grid grid-cols-1 gap-8 md:grid-cols-2">
+                        <div class="card p-6 rounded-lg"><h2 class="text-xl font-semibold text-white mb-4">Desempenho por Bot</h2><div id="bots-performance-table-container" class="overflow-x-auto"><table class="table-custom w-full text-sm"><thead><tr><th>Bot</th><th>Cliques</th><th>Vendas</th><th>Faturamento</th></tr></thead><tbody id="bots-performance-table"><tr><td colspan="4">Carregando...</td></tr></tbody></table></div></div>
+                        <div class="card p-6 rounded-lg"><h2 class="text-xl font-semibold text-white mb-4">Tráfego por Estado</h2><div id="traffic-by-state-table-container" class="overflow-x-auto"><table class="table-custom w-full text-sm"><thead><tr><th>Estado</th><th>Cliques</th></tr></thead><tbody id="traffic-by-state-table"><tr><td colspan="2">Carregando...</td></tr></tbody></table></div></div>
+                    </div>
+                </div>`;
+            },
+            pixels() {
+                const pixelListHTML = App.state.data.pixels.map(p => `<div class="p-2 bg-slate-900/50 rounded flex justify-between items-center"><span class="text-sm">${p.account_name}</span><button data-id="${p.id}" class="delete-pixel-btn btn btn-red text-xs py-1 px-2">Excluir</button></div>`).join('');
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Gerenciar Pixels</h1>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div class="card p-6 rounded-lg">
+                            <h2 class="text-xl font-semibold mb-4 text-white">Adicionar Pixel</h2>
+                            <form id="pixelForm" class="space-y-3"><input name="account_name" placeholder="Nome do Pixel (Ex: Produto Y)" class="form-input w-full p-2 rounded-md" required><input name="pixel_id" placeholder="ID do Pixel da Meta" class="form-input w-full p-2 rounded-md" required><textarea name="meta_api_token" placeholder="Token da API de Conversões" class="form-input w-full p-2 rounded-md" rows="2" required></textarea><button type="submit" class="btn w-full p-2 rounded-md">Adicionar Pixel</button></form>
+                        </div>
+                        <div class="card p-6 rounded-lg"><h2 class="text-xl font-semibold text-white mb-4">Pixels Salvos</h2><div id="pixel-list" class="space-y-2">${pixelListHTML.length ? pixelListHTML : '<p class="text-gray-500 text-sm">Nenhum pixel salvo.</p>'}</div></div>
+                    </div>
+                </div>`;
+            },
+            bots() {
+                 const botListHTML = App.state.data.bots.map(b => `
+                    <div class="p-3 bg-slate-900/50 rounded flex justify-between items-center">
+                        <div>
+                            <span class="text-sm font-medium">${b.bot_name}</span>
+                            <span id="status-indicator-bot-${b.id}"></span>
+                        </div>
+                        <div class="space-x-2">
+                            <button data-id="${b.id}" class="test-bot-btn btn-green text-xs py-1 px-2">Testar</button>
+                            <button data-id="${b.id}" class="delete-bot-btn btn btn-red text-xs py-1 px-2">Excluir</button>
+                        </div>
+                    </div>`).join('');
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Gerenciar Bots</h1>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div class="card p-6 rounded-lg">
+                            <h2 class="text-xl font-semibold mb-4 text-white">Adicionar Bot</h2>
+                            <form id="botForm" class="space-y-3"><input name="bot_name" placeholder="Username do Bot (sem @)" class="form-input w-full p-2 rounded-md" required><input name="bot_token" placeholder="Token do Bot (do BotFather)" class="form-input w-full p-2 rounded-md" required><button type="submit" class="btn w-full p-2 rounded-md">Adicionar Bot</button></form>
+                        </div>
+                        <div class="card p-6 rounded-lg"><h2 class="text-xl font-semibold text-white mb-4">Bots Salvos</h2><div id="bot-list" class="space-y-2">${botListHTML.length ? botListHTML : '<p class="text-gray-500 text-sm">Nenhum bot salvo.</p>'}</div></div>
+                    </div>
+                </div>`;
+            },
+            pressels() {
+                const { pixels, bots, pressels } = App.state.data;
+                const botOptions = bots.map(b => `<option value="${b.id}">${b.bot_name}</option>`).join('');
+                const pixelCheckboxes = pixels.map(p => `<label class="flex items-center space-x-2 text-gray-400 hover:text-white cursor-pointer"><input type="checkbox" name="pixel_ids" value="${p.id}" class="h-4 w-4 bg-slate-700 border-slate-500 rounded text-sky-500 focus:ring-sky-500"><span>${p.account_name}</span></label>`).join('');
+                const presselList = pressels.map(pr => `<div class="p-3 card flex justify-between items-center text-sm"><div><p class="font-semibold">${pr.name}</p><p class="text-xs text-gray-400">Bot: ${pr.bot_name}</p></div><div class="space-x-2"><button data-id="${pr.id}" class="generate-code-btn btn text-xs py-1 px-2">Ver Código</button><button data-id="${pr.id}" class="delete-pressel-btn btn btn-red text-xs py-1 px-2">Excluir</button></div></div>`).join('');
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Criador de Pressel</h1>
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+                        <div class="card p-6 rounded-lg">
+                            <h2 class="text-xl font-bold mb-4 text-white">Criar Nova Pressel</h2>
+                            <form id="presselForm" class="space-y-4"><input name="name" placeholder="Nome da Pressel (Ex: Campanha Black Friday)" class="form-input w-full p-2 rounded-md" required><input name="white_page_url" type="url" placeholder="URL da Página Branca (Fallback)" class="form-input w-full p-2 rounded-md" required><select name="bot_id" class="form-input w-full p-2 rounded-md" required><option value="">Selecione um Bot</option>${botOptions}</select><div class="card p-3"><p class="font-semibold mb-2">Selecione os Pixels:</p><div class="space-y-2">${pixelCheckboxes.length ? pixelCheckboxes : '<p class="text-gray-500 text-sm">Cadastre um pixel primeiro.</p>'}</div></div><button type="submit" class="btn w-full p-3 rounded-md text-base font-bold">Salvar e Gerar Código</button></form>
+                        </div>
+                        <div class="card p-6 rounded-lg"><h2 class="text-xl font-bold mb-4 text-white">Pressels Criadas</h2><div id="pressel-list" class="space-y-3">${presselList.length ? presselList : '<p class="text-gray-500 text-sm">Nenhuma pressel criada.</p>'}</div></div>
+                    </div>
+                </div>`;
+            },
+            transactions() {
+                return `
+                <div class="animate-fade-in">
+                    <div class="flex justify-between items-center mb-6"><h1 class="text-3xl font-bold text-white">Histórico de Transações</h1></div>
+                    ${this.dateFilterComponent('transactions')}
+                    <div class="card p-6 rounded-lg"><div id="transactions-table-container" class="overflow-x-auto"><table class="table-custom w-full text-sm"><thead><tr><th>Status</th><th>Valor</th><th>Bot</th><th>Provedor PIX</th><th>Data</th></tr></thead><tbody id="transactions-table-body"><tr><td colspan="5" class="text-center text-gray-500">Carregando transações...</td></tr></tbody></table></div></div>
+                </div>`;
+            },
+            settings() {
+                const { settings } = App.state.data;
+                const providers = [
+                    { value: 'pushinpay', text: 'PushinPay' },
+                    { value: 'cnpay', text: 'CN Pay' },
+                    { value: 'oasyfy', text: 'Oasy.fy' }
+                ];
+                const createSelect = (name, selectedValue) => {
+                    const options = providers.map(p => `<option value="${p.value}" ${p.value === selectedValue ? 'selected' : ''}>${p.text}</option>`).join('');
+                    return `<select name="${name}" class="form-select w-full p-2 rounded-md">${options}<option value="" ${!selectedValue ? 'selected' : ''}>Nenhum</option></select>`;
+                };
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Configurações de PIX</h1>
+                    <form id="pixSettingsForm" class="max-w-4xl">
+                        <div class="flex border-b border-slate-700 mb-6" id="pix-settings-tabs">
+                            <button type="button" data-tab="priority" class="tab-button active">Ordem de Prioridade</button>
+                            <button type="button" data-tab="credentials" class="tab-button ml-2">Credenciais</button>
+                        </div>
 
-        const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
-        if (apiKey !== ADMIN_API_KEY && commission > 0) {
-            payload.splits = [{ producerId: splitId, amount: commission }];
-        }
+                        <div id="tab-priority" class="tab-content active space-y-8">
+                            <div class="card p-6 rounded-lg">
+                                <h2 class="text-xl font-semibold mb-2 text-white">Ordem de Prioridade dos Provedores</h2>
+                                <p class="text-sm text-gray-400 mb-4">Defina a ordem em que o sistema tentará gerar o PIX. Se o Provedor Primário falhar, o sistema automaticamente tentará o próximo na lista.</p>
+                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <label class="block mb-2 text-sm font-medium text-gray-400">1º - Provedor Primário</label>
+                                        ${createSelect('pix_provider_primary', settings.pix_provider_primary)}
+                                    </div>
+                                    <div>
+                                        <label class="block mb-2 text-sm font-medium text-gray-400">2º - Provedor Secundário</label>
+                                        ${createSelect('pix_provider_secondary', settings.pix_provider_secondary)}
+                                    </div>
+                                    <div>
+                                        <label class="block mb-2 text-sm font-medium text-gray-400">3º - Provedor Terciário</label>
+                                        ${createSelect('pix_provider_tertiary', settings.pix_provider_tertiary)}
+                                    </div>
+                                </div>
+                                <div class="mt-6 pt-6 border-t border-slate-700">
+                                     <button type="button" id="testPriorityRouteBtn" class="btn btn-green w-full md:w-auto">Testar Rota de Prioridade</button>
+                                </div>
+                            </div>
+                        </div>
 
-        const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
-        pixData = response.data;
-        acquirer = isCnpay ? "CNPay" : "Oasy.fy";
-        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
+                        <div id="tab-credentials" class="tab-content space-y-6">
+                            <div class="card p-6 rounded-lg">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 class="text-lg font-medium text-sky-400 inline-block">PushinPay</h3>
+                                        <span id="status-indicator-pushinpay"></span>
+                                    </div>
+                                    <button type="button" data-provider="pushinpay" class="test-pix-btn btn btn-secondary text-xs py-1 px-3">Testar Conexão</button>
+                                </div>
+                                <label class="block mb-2 text-sm text-gray-400">Bearer Token</label>
+                                <input name="pushinpay_token" type="password" value="${settings.pushinpay_token || ''}" class="form-input w-full p-2 rounded-md">
+                            </div>
 
-    } else { // Padrão é PushinPay
-        if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
-        const payload = {
-            value: value_cents,
-            webhook_url: `https://${host}/api/webhook/pushinpay`,
-        };
-        
-        const commission_cents = Math.floor(value_cents * 0.0299);
-        if (apiKey !== ADMIN_API_KEY && commission_cents > 0) {
-            payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
-        }
+                            <div class="card p-6 rounded-lg">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 class="text-lg font-medium text-sky-400 inline-block">CN Pay</h3>
+                                        <span id="status-indicator-cnpay"></span>
+                                    </div>
+                                    <button type="button" data-provider="cnpay" class="test-pix-btn btn btn-secondary text-xs py-1 px-3">Testar Conexão</button>
+                                </div>
+                                <label class="block mb-2 text-sm text-gray-400">Chave Pública (public-key)</label>
+                                <input name="cnpay_public_key" type="password" value="${settings.cnpay_public_key || ''}" class="form-input w-full p-2 rounded-md">
+                                <label class="block mt-4 mb-2 text-sm text-gray-400">Chave Privada (secret-key)</label>
+                                <input name="cnpay_secret_key" type="password" value="${settings.cnpay_secret_key || ''}" class="form-input w-full p-2 rounded-md">
+                            </div>
+                            
+                            <div class="card p-6 rounded-lg">
+                                 <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 class="text-lg font-medium text-sky-400 inline-block">Oasy.fy</h3>
+                                        <span id="status-indicator-oasyfy"></span>
+                                    </div>
+                                    <button type="button" data-provider="oasyfy" class="test-pix-btn btn btn-secondary text-xs py-1 px-3">Testar Conexão</button>
+                                </div>
+                                <label class="block mb-2 text-sm text-gray-400">Chave Pública (public-key)</label>
+                                <input name="oasyfy_public_key" type="password" value="${settings.oasyfy_public_key || ''}" class="form-input w-full p-2 rounded-md">
+                                <label class="block mt-4 mb-2 text-sm text-gray-400">Chave Privada (secret-key)</label>
+                                <input name="oasyfy_secret_key" type="password" value="${settings.oasyfy_secret_key || ''}" class="form-input w-full p-2 rounded-md">
+                            </div>
+                        </div>
+                        
+                        <div class="mt-8"><button type="submit" class="btn w-full p-3 font-bold rounded-md">Salvar Configurações</button></div>
+                    </form>
+                </div>`;
+            },
+            integrations() {
+                const { settings } = App.state.data;
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Integrações</h1>
+                    <div class="max-w-2xl">
+                        <form id="utmifySettingsForm" class="space-y-8">
+                             <div class="card p-6 rounded-lg">
+                                <h2 class="text-xl font-semibold text-white">Utmify</h2>
+                                <p class="text-sm text-gray-400 mt-1 mb-4">Integre com a Utmify para espelhar suas vendas e analisar a performance por UTMs.</p>
+                                <label class="block mb-2 text-sm text-gray-400">Token da API Utmify (x-api-token)</label>
+                                <input name="utmify_api_token" type="password" value="${settings.utmify_api_token || ''}" class="form-input w-full p-2 rounded-md">
+                            </div>
+                            <div><button type="submit" class="btn w-full p-3 font-bold rounded-md">Salvar Integrações</button></div>
+                        </form>
+                    </div>
+                </div>`;
+            },
+            documentation() {
+                return `
+                <div class="animate-fade-in">
+                    <h1 class="text-3xl font-bold text-white mb-6">Documentação e Chave de API</h1>
+                    <div class="grid grid-cols-1 gap-8 max-w-2xl">
+                        <div class="card p-6 rounded-lg">
+                            <h2 class="text-xl font-semibold mb-4 text-white">Sua Chave de API HotTrack</h2>
+                            <p class="text-sm text-gray-400 mb-4">Use esta chave para autenticar suas requisições na API HotTrack (ex: gerar PIX, consultar status).</p>
+                            <div class="flex items-center gap-2">
+                                <input id="hottrack-api-key" type="password" readonly value="${App.state.data.settings.api_key || ''}" class="form-input flex-grow p-2 rounded-md">
+                                <button type="button" class="toggle-visibility-btn p-2 text-gray-400 hover:text-white" data-target="#hottrack-api-key"><svg class="pointer-events-none h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg></button>
+                                <button type="button" class="copy-btn btn text-sm py-2 px-3" data-target="#hottrack-api-key">Copiar</button>
+                            </div>
+                        </div>
+                        <div class="card p-8 rounded-lg">
+                            <h2 class="text-xl font-semibold mb-4 text-white">Documentação Completa</h2>
+                            <p class="text-gray-400 mb-4">Acesse nosso guia detalhado com o passo a passo completo para integrar o HotTrack com o ManyChat e outras ferramentas.</p>
+                            <a href="https://documentacaohot.netlify.app/" target="_blank" rel="noopener noreferrer" class="btn inline-flex items-center gap-2">Acessar Documentação<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" /></svg></a>
+                        </div>
+                    </div>
+                </div>`;
+            },
+            modal(title, content) {
+                return `<div id="modal" class="modal active"><div class="card p-6 rounded-lg w-full max-w-lg animate-fade-in"><div class="flex justify-between items-center mb-4"><h2 class="text-xl font-bold text-white">${title}</h2><button id="closeModalBtn" class="text-gray-400 hover:text-white text-2xl">&times;</button></div>${content}</div></div>`;
+            }
+        },
 
-        const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
-        pixData = pushinpayResponse.data;
-        acquirer = "Woovi";
-        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer };
-    }
-}
-
-
-// --- ROTAS DE AUTENTICAÇÃO ---
-app.post('/api/sellers/register', async (req, res) => {
-    const sql = getDbConnection();
-    const { name, email, password } = req.body;
-    if (!name || !email || !password || password.length < 8) return res.status(400).json({ message: 'Dados inválidos.' });
-    try {
-        const normalizedEmail = email.trim().toLowerCase();
-        const existingSeller = await sql`SELECT id FROM sellers WHERE LOWER(email) = ${normalizedEmail}`;
-        if (existingSeller.length > 0) {
-            return res.status(409).json({ message: 'Este email já está em uso.' });
-        }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const apiKey = uuidv4();
-        await sql`INSERT INTO sellers (name, email, password_hash, api_key) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey})`;
-        res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
-    } catch (error) {
-        console.error("Erro no registro:", error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
-    }
-});
-
-app.post('/api/sellers/login', async (req, res) => {
-    const sql = getDbConnection();
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
-    try {
-        const normalizedEmail = email.trim().toLowerCase();
-        const sellerResult = await sql`SELECT * FROM sellers WHERE email = ${normalizedEmail}`;
-        if (sellerResult.length === 0) {
-             console.warn(`[LOGIN FAILURE] Usuário não encontrado no banco de dados para o email: "${normalizedEmail}"`);
-            return res.status(404).json({ message: 'Usuário não encontrado.' });
-        }
-        
-        const seller = sellerResult[0];
-        
-        if (!seller.is_active) {
-            return res.status(403).json({ message: 'Este usuário está bloqueado.' });
-        }
-        
-        const isPasswordCorrect = await bcrypt.compare(password, seller.password_hash);
-        if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
-        
-        const tokenPayload = { id: seller.id, email: seller.email };
-        const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
-        
-        const { password_hash, ...sellerData } = seller;
-        res.status(200).json({ message: 'Login bem-sucedido!', token, seller: sellerData });
-
-    } catch (error) {
-        console.error("ERRO DETALHADO NO LOGIN:", error); 
-        res.status(500).json({ message: 'Erro interno do servidor.' });
-    }
-});
-
-// --- ROTA DE DADOS DO PAINEL ---
-app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
-        const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
-        const presselsPromise = sql`
-            SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
-            FROM pressels p
-            LEFT JOIN ( SELECT pressel_id, array_agg(pixel_config_id) as pixel_ids FROM pressel_pixels GROUP BY pressel_id ) px ON p.id = px.pressel_id
-            JOIN telegram_bots b ON p.bot_id = b.id
-            WHERE p.seller_id = ${sellerId} ORDER BY p.created_at DESC`;
-        const botsPromise = sql`SELECT * FROM telegram_bots WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
-        const [settingsResult, pixels, pressels, bots] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise]);
-        const settings = settingsResult[0] || {};
-        res.json({ settings, pixels, pressels, bots });
-    } catch (error) {
-        console.error("Erro ao buscar dados do dashboard:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados.' });
-    }
-});
-
-// --- ROTAS DE GERENCIAMENTO (CRUD) ---
-app.post('/api/pixels', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { account_name, pixel_id, meta_api_token } = req.body;
-    if (!account_name || !pixel_id || !meta_api_token) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
-    try {
-        const newPixel = await sql`INSERT INTO pixel_configurations (seller_id, account_name, pixel_id, meta_api_token) VALUES (${req.user.id}, ${account_name}, ${pixel_id}, ${meta_api_token}) RETURNING *;`;
-        res.status(201).json(newPixel[0]);
-    } catch (error) {
-        if (error.code === '23505') { return res.status(409).json({ message: 'Este ID de Pixel já foi cadastrado.' }); }
-        console.error("Erro ao salvar pixel:", error);
-        res.status(500).json({ message: 'Erro ao salvar o pixel.' });
-    }
-});
-
-app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        await sql`DELETE FROM pixel_configurations WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
-        res.status(204).send();
-    } catch (error) {
-        console.error("Erro ao excluir pixel:", error);
-        res.status(500).json({ message: 'Erro ao excluir o pixel.' });
-    }
-});
-
-app.post('/api/bots', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { bot_name, bot_token } = req.body;
-    if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
-    try {
-        const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
-        res.status(201).json(newBot[0]);
-    } catch (error) {
-        if (error.code === '23505') { return res.status(409).json({ message: 'Um bot com este nome já existe.' }); }
-        console.error("Erro ao salvar bot:", error);
-        res.status(500).json({ message: 'Erro ao salvar o bot.' });
-    }
-});
-
-app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        await sql`DELETE FROM telegram_bots WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
-        res.status(204).send();
-    } catch (error) {
-        console.error("Erro ao excluir bot:", error);
-        res.status(500).json({ message: 'Erro ao excluir o bot.' });
-    }
-});
-
-app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { bot_id } = req.body;
-    if (!bot_id) return res.status(400).json({ message: 'ID do bot é obrigatório.' });
-
-    try {
-        const [bot] = await sql`SELECT bot_token, bot_name FROM telegram_bots WHERE id = ${bot_id} AND seller_id = ${req.user.id}`;
-        if (!bot) {
-            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
-        }
-
-        const response = await axios.get(`https://api.telegram.org/bot${bot.bot_token}/getMe`);
-        
-        if (response.data.ok) {
-            res.status(200).json({ 
-                message: `Conexão com o bot @${response.data.result.username} bem-sucedida!`,
-                bot_info: response.data.result
+        addAuthEventListeners() {
+            const container = document.getElementById('app');
+            container.addEventListener('click', (e) => {
+                if (e.target.id === 'showRegister') { e.preventDefault(); this.renderLogin('register'); }
+                if (e.target.id === 'showLogin') { e.preventDefault(); this.renderLogin('login'); }
             });
-        } else {
-            throw new Error('A API do Telegram retornou um erro.');
-        }
-
-    } catch (error) {
-        console.error(`[BOT TEST ERROR] Bot ID: ${bot_id} - Erro:`, error.response?.data || error.message);
-        let errorMessage = 'Falha ao conectar com o bot. Verifique o token e tente novamente.';
-        if (error.response?.status === 401) {
-            errorMessage = 'Token inválido. Verifique se o token do bot foi copiado corretamente do BotFather.';
-        } else if (error.response?.status === 404) {
-            errorMessage = 'Bot não encontrado. O token pode estar incorreto ou o bot foi deletado.';
-        }
-        res.status(500).json({ message: errorMessage });
-    }
-});
-
-app.post('/api/pressels', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { name, bot_id, white_page_url, pixel_ids } = req.body;
-    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
-    
-    try {
-        const numeric_bot_id = parseInt(bot_id, 10);
-        const numeric_pixel_ids = pixel_ids.map(id => parseInt(id, 10));
-
-        const botResult = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${numeric_bot_id} AND seller_id = ${req.user.id}`;
-        if (botResult.length === 0) {
-            return res.status(404).json({ message: 'Bot não encontrado.' });
-        }
-        const bot_name = botResult[0].bot_name;
-
-        await sql`BEGIN`;
-        try {
-            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
-            
-            for (const pixelId of numeric_pixel_ids) {
-                await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
-            }
-            await sql`COMMIT`;
-            
-            res.status(201).json({ ...newPressel, pixel_ids: numeric_pixel_ids, bot_name });
-        } catch (transactionError) {
-            await sql`ROLLBACK`;
-            throw transactionError;
-        }
-    } catch (error) {
-        console.error("Erro ao salvar pressel:", error);
-        res.status(500).json({ message: 'Erro ao salvar a pressel.' });
-    }
-});
-
-app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        await sql`DELETE FROM pressels WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
-        res.status(204).send();
-    } catch (error) {
-        console.error("Erro ao excluir pressel:", error);
-        res.status(500).json({ message: 'Erro ao excluir a pressel.' });
-    }
-});
-
-// --- ROTAS DE CONFIGURAÇÃO ---
-app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { 
-        pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
-        pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
-    } = req.body;
-    try {
-        await sql`UPDATE sellers SET 
-            pushinpay_token = ${pushinpay_token || null}, 
-            cnpay_public_key = ${cnpay_public_key || null}, 
-            cnpay_secret_key = ${cnpay_secret_key || null}, 
-            oasyfy_public_key = ${oasyfy_public_key || null}, 
-            oasyfy_secret_key = ${oasyfy_secret_key || null},
-            pix_provider_primary = ${pix_provider_primary || 'pushinpay'},
-            pix_provider_secondary = ${pix_provider_secondary || null},
-            pix_provider_tertiary = ${pix_provider_tertiary || null}
-            WHERE id = ${req.user.id}`;
-        res.status(200).json({ message: 'Configurações de PIX salvas com sucesso.' });
-    } catch (error) {
-        console.error("Erro ao salvar configurações de PIX:", error);
-        res.status(500).json({ message: 'Erro ao salvar as configurações.' });
-    }
-});
-
-app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { utmify_api_token } = req.body;
-    try {
-        await sql`UPDATE sellers SET 
-            utmify_api_token = ${utmify_api_token || null}
-            WHERE id = ${req.user.id}`;
-        res.status(200).json({ message: 'Token da Utmify salvo com sucesso.' });
-    } catch (error) {
-        console.error("Erro ao salvar token da Utmify:", error);
-        res.status(500).json({ message: 'Erro ao salvar as configurações.' });
-    }
-});
-
-// --- ROTA DE RASTREAMENTO E CONSULTAS ---
-app.post('/api/registerClick', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
-    const { sellerApiKey, presselId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
-    
-    if (!sellerApiKey || !presselId) return res.status(400).json({ message: 'Dados insuficientes.' });
-    
-    const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
-    let city = 'Desconhecida', state = 'Desconhecido';
-    try {
-        if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
-            const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
-            city = geo.data.city || city;
-            state = geo.data.regionName || state;
-        }
-    } catch (e) { console.error("Erro ao buscar geolocalização:", e.message); }
-    
-    try {
-        const result = await sql`INSERT INTO clicks (
-            seller_id, pressel_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
-            utm_source, utm_campaign, utm_medium, utm_content, utm_term
-        ) 
-        SELECT
-            s.id, ${presselId}, ${ip_address}, ${user_agent}, ${referer}, ${city}, ${state}, ${fbclid}, ${fbp}, ${fbc},
-            ${utm_source || null}, ${utm_campaign || null}, ${utm_medium || null}, ${utm_content || null}, ${utm_term || null}
-        FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING id;`;
+            container.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const form = e.target;
+                const data = Object.fromEntries(new FormData(form).entries());
+                if (form.id === 'loginForm') await this.login(data.email, data.password);
+                if (form.id === 'registerForm') await this.register(data.name, data.email, data.password);
+            });
+        },
         
-        if (result.length === 0) return res.status(404).json({ message: 'API Key ou Pressel inválida.' });
-        
-        const click_record_id = result[0].id;
-        const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
-        const db_click_id = `/start ${clean_click_id}`;
-        await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
-        
-        res.status(200).json({ status: 'success', click_id: clean_click_id });
-    } catch (error) {
-        console.error("Erro ao registrar clique:", error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
-    }
-});
+        addDashboardEventListeners() {
+            document.addEventListener('click', async (e) => {
+                if (e.target.id === 'logoutButton') this.logout();
+                if (e.target.closest('#closeModalBtn')) document.getElementById('modal-container').innerHTML = '';
+                
+                const sidebarLink = e.target.closest('.nav-link');
+                if (sidebarLink) this.navigateTo(sidebarLink.dataset.target);
 
-app.post('/api/click/info', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
-    const apiKey = req.headers['x-api-key'];
-    const { click_id } = req.body;
-    if (!apiKey || !click_id) return res.status(400).json({ message: 'API Key e click_id são obrigatórios.' });
-    
-    try {
-        const sellerResult = await sql`SELECT id, email FROM sellers WHERE api_key = ${apiKey}`;
-        if (sellerResult.length === 0) {
-            console.warn(`[CLICK INFO] Tentativa de consulta com API Key inválida: ${apiKey}`);
-            return res.status(401).json({ message: 'API Key inválida.' });
-        }
-        
-        const seller_id = sellerResult[0].id;
-        const seller_email = sellerResult[0].email;
-        
-        const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${click_id} AND seller_id = ${seller_id}`;
-        
-        if (clickResult.length === 0) {
-            console.warn(`[CLICK INFO NOT FOUND] Vendedor (ID: ${seller_id}, Email: ${seller_email}) tentou consultar o click_id "${click_id}", mas não foi encontrado.`);
-            return res.status(404).json({ message: 'Click ID não encontrado para este vendedor.' });
-        }
-        
-        const clickInfo = clickResult[0];
-        res.status(200).json({ status: 'success', city: clickInfo.city, state: clickInfo.state });
+                const copyBtn = e.target.closest('.copy-btn');
+                if (copyBtn) {
+                    const targetInput = document.querySelector(copyBtn.dataset.target);
+                    if(targetInput) {
+                        const textToCopy = targetInput.value || targetInput.textContent;
+                        navigator.clipboard.writeText(textToCopy).then(() => {
+                            const originalText = copyBtn.textContent;
+                            copyBtn.textContent = 'Copiado!';
+                            setTimeout(() => { copyBtn.textContent = originalText; }, 2000);
+                        });
+                    }
+                }
+                
+                const toggleBtn = e.target.closest('.toggle-visibility-btn');
+                if (toggleBtn) {
+                    const targetInput = document.querySelector(toggleBtn.dataset.target);
+                    const isPassword = targetInput.type === 'password';
+                    targetInput.type = isPassword ? 'text' : 'password';
+                    toggleBtn.innerHTML = isPassword 
+                        ? `<svg class="pointer-events-none h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.243 4.243L6.228 6.228" /></svg>` 
+                        : `<svg class="pointer-events-none h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" /><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>`;
+                }
 
-    } catch (error) {
-        console.error("Erro ao consultar informações do clique:", error);
-        res.status(500).json({ message: 'Erro interno ao consultar informações do clique.' });
-    }
-});
+                if (e.target.classList.contains('generate-code-btn')) {
+                    const presselId = e.target.dataset.id;
+                    const pressel = this.state.data.pressels.find(p => p.id == presselId);
+                    if (pressel) this.generatePresselCode(pressel);
+                }
+                
+                if (e.target.classList.contains('test-bot-btn')) {
+                    const botId = e.target.dataset.id;
+                    this.testBotConnection(botId, e.target);
+                }
 
-// --- ROTAS DE DASHBOARD E TRANSAÇÕES ---
-app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const sellerId = req.user.id;
-        const { startDate, endDate } = req.query;
-        const hasDateFilter = startDate && endDate;
+                if (e.target.classList.contains('test-pix-btn')) {
+                    const provider = e.target.dataset.provider;
+                    this.testIndividualPixConnection(provider, e.target);
+                }
+                
+                if (e.target.id === 'testPriorityRouteBtn') {
+                    this.testPriorityRoute(e.target);
+                }
 
-        // Versões condicionais das consultas
-        const totalClicksResult = hasDateFilter
-            ? await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId}`;
+                const tabButton = e.target.closest('.tab-button');
+                if (tabButton) {
+                    const tabName = tabButton.dataset.tab;
+                    document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+                    tabButton.classList.add('active');
+                    document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+                    document.getElementById(`tab-${tabName}`).classList.add('active');
+                }
 
-        const totalPixGeneratedResult = hasDateFilter
-            ? await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId}`;
+                if (e.target.classList.contains('delete-pixel-btn') || e.target.classList.contains('delete-bot-btn') || e.target.classList.contains('delete-pressel-btn')) {
+                    const id = e.target.dataset.id;
+                    let type = '', endpoint = '';
+                    if (e.target.classList.contains('delete-pixel-btn')) { type = 'pixels'; endpoint = 'pixels'; }
+                    if (e.target.classList.contains('delete-bot-btn')) { type = 'bots'; endpoint = 'bots'; }
+                    if (e.target.classList.contains('delete-pressel-btn')) { type = 'pressels'; endpoint = 'pressels'; }
 
-        const totalPixPaidResult = hasDateFilter
-            ? await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
+                    if (confirm(`Tem certeza que deseja excluir este item?`)) {
+                        try {
+                            await this.apiRequest(`/api/${endpoint}/${id}`, 'DELETE');
+                            this.state.data[type] = this.state.data[type].filter(item => item.id != id);
+                            this.navigateTo(this.state.currentPage);
+                            this.showToast('Item excluído com sucesso!', 'success');
+                        } catch(err) {}
+                    }
+                }
+                
+                const filterContainer = e.target.closest('#transactions-date-filter, #dashboard-date-filter');
+                if (filterContainer) {
+                    const page = filterContainer.id.split('-')[0];
+                    if (e.target.dataset.period) { this.handleFilterChange(page, e.target.dataset.period); }
+                    else if (e.target.id === `apply-custom-date-filter-${page}`) {
+                        const startDate = document.getElementById(`${page}-start-date`).value;
+                        const endDate = document.getElementById(`${page}-end-date`).value;
+                        if (startDate && endDate) { this.handleFilterChange(page, 'custom', startDate, endDate); }
+                        else { this.showToast('Por favor, selecione data de início e fim.', 'error'); }
+                    } else if (e.target.id === `clear-date-filter-${page}`) { this.handleFilterChange(page, 'all'); }
+                }
+            });
 
-        const botsPerformance = hasDateFilter
-            ? await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
-            : await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
+            document.addEventListener('submit', async (e) => {
+                const form = e.target.closest('form');
+                if (!form) return;
+                
+                e.preventDefault();
+                const button = form.querySelector('button[type="submit"]');
+                const originalButtonText = button.innerHTML;
+                button.innerHTML = 'Salvando...';
+                button.disabled = true;
 
-        const clicksByState = hasDateFilter
-            ? await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
-            : await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
+                let data = Object.fromEntries(new FormData(form).entries());
+                try {
+                    if (form.id === 'pixSettingsForm') {
+                        await this.apiRequest('/api/settings/pix', 'POST', data);
+                        App.state.data.settings = { ...App.state.data.settings, ...data };
+                        this.showToast('Configurações PIX salvas!', 'success');
+                    }
+                    else if (form.id === 'utmifySettingsForm') {
+                        await this.apiRequest('/api/settings/utmify', 'POST', data);
+                        App.state.data.settings = { ...App.state.data.settings, ...data };
+                        this.showToast('Integração Utmify salva!', 'success');
+                    }
+                    else if (form.id === 'pixelForm') {
+                        const newPixel = await this.apiRequest('/api/pixels', 'POST', data);
+                        if (newPixel) { this.state.data.pixels.unshift(newPixel); this.navigateTo('pixels'); }
+                    }
+                    else if (form.id === 'botForm') {
+                        const newBot = await this.apiRequest('/api/bots', 'POST', data);
+                        if (newBot) { this.state.data.bots.unshift(newBot); this.navigateTo('bots'); }
+                    }
+                    else if (form.id === 'presselForm') {
+                        const pixel_ids = Array.from(form.querySelectorAll('input[name="pixel_ids"]:checked')).map(cb => cb.value);
+                        if (pixel_ids.length === 0) {
+                             this.showToast('Selecione ao menos um pixel.', 'error');
+                        } else {
+                            const payload = { ...data, pixel_ids };
+                            const newPressel = await this.apiRequest('/api/pressels', 'POST', payload);
+                            if (newPressel) {
+                                this.state.data.pressels.unshift(newPressel);
+                                const presselListContainer = document.getElementById('pressel-list');
+                                if (presselListContainer) {
+                                    const presselListHTML = this.state.data.pressels.map(pr => `<div class="p-3 card flex justify-between items-center text-sm"><div><p class="font-semibold">${pr.name}</p><p class="text-xs text-gray-400">Bot: ${pr.bot_name}</p></div><div class="space-x-2"><button data-id="${pr.id}" class="generate-code-btn btn text-xs py-1 px-2">Ver Código</button><button data-id="${pr.id}" class="delete-pressel-btn btn btn-red text-xs py-1 px-2">Excluir</button></div></div>`).join('');
+                                    presselListContainer.innerHTML = presselListHTML.length ? presselListHTML : '<p class="text-gray-500 text-sm">Nenhuma pressel criada.</p>';
+                                }
+                                form.reset();
+                                this.generatePresselCode(newPressel);
+                            }
+                        }
+                    }
+                } catch(e) { /* Errors are handled by apiRequest */ }
+                finally {
+                    if(button) {
+                        button.innerHTML = originalButtonText;
+                        button.disabled = false;
+                    }
+                }
+            });
+        },
 
-        const dailyRevenue = await sql`SELECT DATE(pt.paid_at) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at) ORDER BY date ASC`;
-
-        const totalClicks = totalClicksResult[0].count;
-        const totalPixGenerated = totalPixGeneratedResult[0].total_pix_generated;
-        const totalRevenue = totalPixGeneratedResult[0].total_revenue;
-        const totalPixPaid = totalPixPaidResult[0].total_pix_paid;
-        const paidRevenue = totalPixPaidResult[0].paid_revenue;
-        const conversionRate = totalClicks > 0 ? ((totalPixPaid / totalClicks) * 100).toFixed(2) : 0;
-        
-        res.status(200).json({
-            total_clicks: parseInt(totalClicks),
-            total_pix_generated: parseInt(totalPixGenerated),
-            total_pix_paid: parseInt(totalPixPaid),
-            conversion_rate: parseFloat(conversionRate),
-            total_revenue: parseFloat(totalRevenue),
-            paid_revenue: parseFloat(paidRevenue),
-            bots_performance: botsPerformance.map(b => ({ ...b, total_clicks: parseInt(b.total_clicks), total_pix_paid: parseInt(b.total_pix_paid), paid_revenue: parseFloat(b.paid_revenue) })),
-            clicks_by_state: clicksByState.map(s => ({ ...s, total_clicks: parseInt(s.total_clicks) })),
-            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) }))
-        });
-    } catch (error) {
-        console.error("Erro ao buscar métricas do dashboard:", error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
-    }
-});
-
-app.get('/api/transactions', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const sellerId = req.user.id;
-        const transactions = await sql`
-            SELECT pt.status, pt.pix_value, tb.bot_name, pt.provider, pt.created_at
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            JOIN pressels p ON c.pressel_id = p.id
-            JOIN telegram_bots tb ON p.bot_id = tb.id
-            WHERE c.seller_id = ${sellerId}
-            ORDER BY pt.created_at DESC;`;
-        res.status(200).json(transactions);
-    } catch (error) {
-        console.error("Erro ao buscar transações:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados das transações.' });
-    }
-});
-
-// --- ROTAS DE GERAÇÃO E CONSULTA DE PIX (COM FALLBACK) ---
-app.post('/api/pix/generate', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
-    const apiKey = req.headers['x-api-key'];
-    const { click_id, value_cents, customer, product } = req.body;
-    
-    if (!apiKey || !click_id || !value_cents) return res.status(400).json({ message: 'API Key, click_id e value_cents são obrigatórios.' });
-
-    try {
-        const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
-        if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
-
-        const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${click_id} AND seller_id = ${seller.id}`;
-        if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
-        
-        const providerOrder = [
-            seller.pix_provider_primary,
-            seller.pix_provider_secondary,
-            seller.pix_provider_tertiary
-        ].filter(Boolean);
-
-        let lastError = null;
-
-        for (const provider of providerOrder) {
+        async apiRequest(endpoint, method = 'GET', body = null) {
             try {
-                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
-                
-                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
-                
-                await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
-
-                const customerDataForUtmify = customer || { name: "Cliente Interessado", email: "cliente@email.com" };
-                const productDataForUtmify = product || { id: "prod_1", name: "Produto Ofertado" };
-                await sendEventToUtmify('waiting_payment', click, { provider_transaction_id: pixResult.transaction_id, pix_value: value_cents / 100, created_at: new Date() }, seller, customerDataForUtmify, productDataForUtmify);
-                
-                return res.status(200).json(pixResult);
+                const headers = { 'Content-Type': 'application/json' };
+                if (this.state.token) { headers['Authorization'] = `Bearer ${this.state.token}`; }
+                const options = { method, headers };
+                if (body) { options.body = JSON.stringify(body); }
+                const response = await fetch(`${this.state.API_BASE_URL}${endpoint}`, options);
+                if (response.status === 204) return null;
+                const data = await response.json();
+                if (!response.ok) throw data;
+                return data;
             } catch (error) {
-                console.error(`[PIX GENERATE FALLBACK] Falha ao gerar PIX com ${provider}:`, error.message);
-                lastError = error;
+                this.showToast(error.message || 'Falha na conexão', 'error');
+                if (error.message && (error.message.includes('inválido') || error.message.includes('expirado'))) this.logout();
+                throw error;
             }
-        }
-
-        console.error(`[PIX GENERATE FINAL ERROR] Seller ID: ${seller?.id}, Email: ${seller?.email} - Todas as tentativas falharam. Último erro:`, lastError?.message || lastError);
-        return res.status(500).json({ message: 'Não foi possível gerar o PIX. Todos os provedores falharam.' });
-
-    } catch (error) {
-        console.error(`[PIX GENERATE ERROR] Erro geral na rota:`, error.message);
-        res.status(500).json({ message: 'Erro interno ao processar a geração de PIX.' });
-    }
-});
-
-// --- ROTA DE TESTE DE PROVEDOR DE PIX ---
-app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const sellerId = req.user.id;
-    const { provider } = req.body;
-
-    if (!provider) {
-        return res.status(400).json({ message: 'O nome do provedor é obrigatório.' });
-    }
-
-    try {
-        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
-        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        },
         
-        const value_cents = 50;
-        
-        console.log(`Iniciando teste de PIX para o vendedor ${seller.id} com o provedor ${provider}`);
-        const startTime = Date.now();
-        
-        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
-        
-        const endTime = Date.now();
-        const responseTime = ((endTime - startTime) / 1000).toFixed(2);
-
-        res.status(200).json({
-            provider: provider.toUpperCase(),
-            acquirer: pixResult.acquirer,
-            responseTime: responseTime,
-            qr_code_text: pixResult.qr_code_text
-        });
-
-    } catch (error) {
-        console.error(`[PIX TEST ERROR] Seller ID: ${sellerId}, Provider: ${provider} - Erro:`, error.response?.data || error.message);
-        res.status(500).json({ 
-            message: `Falha ao gerar PIX de teste com ${provider.toUpperCase()}. Verifique as credenciais.`, 
-            details: error.response?.data?.message || error.message 
-        });
-    }
-});
-
-
-// --- ROTA PARA TESTAR A ROTA DE PRIORIDADE ---
-app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const sellerId = req.user.id;
-    let testLog = [];
-
-    try {
-        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
-        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
-        
-        const providerOrder = [
-            { name: seller.pix_provider_primary, position: 'Primário' },
-            { name: seller.pix_provider_secondary, position: 'Secundário' },
-            { name: seller.pix_provider_tertiary, position: 'Terciário' }
-        ].filter(p => p.name); 
-
-        if (providerOrder.length === 0) {
-            return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
-        }
-
-        const value_cents = 50;
-
-        for (const providerInfo of providerOrder) {
-            const provider = providerInfo.name;
-            const position = providerInfo.position;
-            
+        async login(email, password) {
             try {
-                console.log(`Testando provedor ${position}: ${provider}`);
-                const startTime = Date.now();
-                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
-                const endTime = Date.now();
-                const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+                const data = await this.apiRequest('/api/sellers/login', 'POST', { email, password });
+                this.state.token = data.token;
+                localStorage.setItem('hottrack_token', data.token);
+                await this.init();
+            } catch (e) {}
+        },
+        
+        async register(name, email, password) {
+            try {
+                await this.apiRequest('/api/sellers/register', 'POST', { name, email, password });
+                this.showToast('Cadastro realizado! Faça o login.', 'success');
+                this.renderLogin('login');
+            } catch (e) {}
+        },
 
-                testLog.push(`SUCESSO com Provedor ${position} (${provider.toUpperCase()}).`);
-                return res.status(200).json({
-                    success: true,
-                    position: position,
-                    provider: provider.toUpperCase(),
-                    acquirer: pixResult.acquirer,
-                    responseTime: responseTime,
-                    qr_code_text: pixResult.qr_code_text,
-                    log: testLog
+        logout() {
+            this.state.token = null;
+            localStorage.removeItem('hottrack_token');
+            this.init();
+        },
+
+        navigateTo(page) {
+            this.state.currentPage = page;
+            const contentContainer = document.getElementById('content');
+            if (contentContainer && this.templates[page]) {
+                contentContainer.innerHTML = this.templates[page]();
+                
+                document.querySelectorAll('.nav-link').forEach(item => { item.classList.toggle('active', item.dataset.target === page); });
+                
+                if (page === 'dashboard') this.handleFilterChange(page, 'last7days');
+                else if (page === 'transactions') this.handleFilterChange(page, 'all');
+                else if (page === 'settings') this.updateAllPixStatusIndicators();
+                else if (page === 'bots') this.updateAllBotStatusIndicators();
+            }
+        },
+        
+        async fetchDashboardMetrics() {
+            try {
+                const { startDate, endDate } = this.state.dateFilter;
+                const query = new URLSearchParams({ 
+                    startDate: startDate || '',
+                    endDate: endDate || ''
+                }).toString();
+                
+                const metrics = await this.apiRequest(`/api/dashboard/metrics?${query}`);
+                this.state.data.dashboard = metrics;
+
+                document.getElementById('metric-clicks').textContent = (metrics.total_clicks || 0).toLocaleString('pt-BR');
+                document.getElementById('metric-generated').textContent = (metrics.total_pix_generated || 0).toLocaleString('pt-BR');
+                document.getElementById('metric-paid').textContent = (metrics.total_pix_paid || 0).toLocaleString('pt-BR');
+                document.getElementById('metric-conversion-rate').textContent = `${(metrics.conversion_rate || 0).toFixed(2).replace('.', ',')}%`;
+                document.getElementById('metric-total-revenue').textContent = `R$ ${(metrics.total_revenue || 0).toFixed(2).replace('.', ',')}`;
+                document.getElementById('metric-paid-revenue').textContent = `R$ ${(metrics.paid_revenue || 0).toFixed(2).replace('.', ',')}`;
+                
+                const botsTableBody = document.getElementById('bots-performance-table');
+                if (metrics.bots_performance && metrics.bots_performance.length > 0) {
+                    botsTableBody.innerHTML = metrics.bots_performance.map(b => `<tr class="hover:bg-slate-800/50"><td>${b.bot_name}</td><td>${(b.total_clicks || 0).toLocaleString('pt-BR')}</td><td>${(b.total_pix_paid || 0).toLocaleString('pt-BR')}</td><td>R$ ${(b.paid_revenue || 0).toFixed(2).replace('.', ',')}</td></tr>`).join('');
+                } else {
+                    botsTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-gray-500">Nenhum dado de bot.</td></tr>';
+                }
+                const trafficTableBody = document.getElementById('traffic-by-state-table');
+                if (metrics.clicks_by_state && metrics.clicks_by_state.length > 0) {
+                    trafficTableBody.innerHTML = metrics.clicks_by_state.map(s => `<tr class="hover:bg-slate-800/50"><td>${s.state}</td><td>${s.total_clicks.toLocaleString('pt-BR')}</td></tr>`).join('');
+                } else {
+                    trafficTableBody.innerHTML = '<tr><td colspan="2" class="text-center text-gray-500">Nenhum tráfego registrado por estado.</td></tr>';
+                }
+                
+                this.renderRevenueChart();
+
+            } catch (e) { console.error("Erro ao carregar métricas do painel:", e); }
+        },
+        async fetchTransactions() {
+            const tableBody = document.getElementById('transactions-table-body');
+            tableBody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-500">Carregando transações...</td></tr>';
+            try {
+                const transactions = await this.apiRequest('/api/transactions');
+                this.state.data.transactions = transactions;
+                this.renderTransactionsTable();
+            } catch (e) {
+                tableBody.innerHTML = '<tr><td colspan="5" class="text-center text-red-400">Erro ao carregar transações.</td></tr>';
+            }
+        },
+        renderTransactionsTable() {
+            const tableBody = document.getElementById('transactions-table-body');
+            if (!tableBody) return;
+
+            const { period, startDate, endDate } = this.state.dateFilter;
+            let filteredTransactions = this.state.data.transactions;
+
+            if (period !== 'all' && startDate && endDate) {
+                const start = new Date(`${startDate}T00:00:00`);
+                const end = new Date(`${endDate}T23:59:59`);
+                filteredTransactions = this.state.data.transactions.filter(t => {
+                    const transactionDate = new Date(t.created_at);
+                    return transactionDate >= start && transactionDate <= end;
+                });
+            }
+
+            if (filteredTransactions.length > 0) {
+                tableBody.innerHTML = filteredTransactions.map(t => {
+                    const statusColor = t.status === 'paid' ? 'text-green-400' : 'text-yellow-400';
+                    const statusText = t.status === 'paid' ? 'Pago' : 'Pendente';
+                    const formattedValue = `R$ ${parseFloat(t.pix_value).toFixed(2).replace('.', ',')}`;
+                    const formattedDate = new Date(t.created_at).toLocaleString('pt-BR');
+                    return `<tr class="hover:bg-slate-800/50"><td class="${statusColor}">${statusText}</td><td>${formattedValue}</td><td>${t.bot_name}</td><td>${t.provider.toUpperCase()}</td><td>${formattedDate}</td></tr>`;
+                }).join('');
+            } else {
+                tableBody.innerHTML = '<tr><td colspan="5" class="text-center text-gray-500">Nenhuma transação encontrada.</td></tr>';
+            }
+        },
+        handleFilterChange(page, period, customStartDate, customEndDate) {
+            const now = new Date();
+            let startDate, endDate;
+
+            switch(period) {
+                case 'today':
+                    startDate = endDate = now.toISOString().split('T')[0];
+                    break;
+                case 'yesterday':
+                    const yesterday = new Date(now);
+                    yesterday.setDate(now.getDate() - 1);
+                    startDate = endDate = yesterday.toISOString().split('T')[0];
+                    break;
+                case 'last7days':
+                    endDate = now.toISOString().split('T')[0];
+                    const sevenDaysAgo = new Date(now);
+                    sevenDaysAgo.setDate(now.getDate() - 6);
+                    startDate = sevenDaysAgo.toISOString().split('T')[0];
+                    break;
+                case 'thisMonth':
+                    startDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+                    endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+                    break;
+                case 'custom':
+                    startDate = customStartDate;
+                    endDate = customEndDate;
+                    break;
+                case 'all':
+                default:
+                    startDate = null;
+                    endDate = null;
+            }
+
+            this.state.dateFilter = { period, startDate, endDate };
+
+            const filterContainer = document.getElementById(`${page}-date-filter`);
+            if (filterContainer) {
+                const newFilterHTML = this.templates.dateFilterComponent(page);
+                filterContainer.outerHTML = newFilterHTML;
+            }
+            
+            if (page === 'dashboard') {
+                this.fetchDashboardMetrics();
+            } else if (page === 'transactions') {
+                this.fetchTransactions(); // Recarrega os dados e depois filtra
+            }
+        },
+        
+        renderRevenueChart() {
+            const ctx = document.getElementById('revenueChart');
+            if (!ctx) return;
+            
+            let data = this.state.data.dashboard.daily_revenue || [];
+            
+            // Filtra os dados do gráfico pelo dateFilter do frontend
+            const { startDate, endDate } = this.state.dateFilter;
+            if (startDate && endDate) {
+                data = data.filter(item => item.date >= startDate && item.date <= endDate);
+            }
+            
+            const labels = data.map(item => new Date(item.date).toLocaleDateString('pt-BR', { timeZone: 'UTC' }));
+            const revenues = data.map(item => item.revenue);
+
+            if (this.state.revenueChart) {
+                this.state.revenueChart.destroy();
+            }
+
+            this.state.revenueChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Faturamento Pago',
+                        data: revenues,
+                        backgroundColor: 'rgba(56, 189, 248, 0.2)',
+                        borderColor: '#38bdf8',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        fill: true,
+                        pointBackgroundColor: '#38bdf8',
+                        pointRadius: 4,
+                        pointHoverRadius: 6,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { 
+                                color: '#94a3b8',
+                                callback: function(value) { return 'R$ ' + value.toFixed(2).replace('.', ','); }
+                            },
+                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
+                        },
+                        x: {
+                            ticks: { color: '#94a3b8' },
+                            grid: { color: 'rgba(51, 65, 85, 0.5)' }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            backgroundColor: '#020617',
+                            titleColor: '#e2e8f0',
+                            bodyColor: '#cbd5e1',
+                            borderColor: '#334155',
+                            borderWidth: 1,
+                            callbacks: {
+                                label: function(context) {
+                                    return `Faturamento: R$ ${context.raw.toFixed(2).replace('.', ',')}`;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        },
+        
+        generatePresselCode(pressel) {
+            const { settings } = this.state.data;
+            const botLink = `https://t.me/${pressel.bot_name}?start=`;
+            const sellerApiKey = settings.api_key;
+            const apiBaseUrl = this.state.API_BASE_URL;
+
+            const htmlContent = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Redirecionando...</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>
+        !function(f,b,e,v,n,t,s)
+        {if(f.fbq)return;n=f.fbq=function(){n.callMethod?
+        n.callMethod.apply(n,arguments):n.queue.push(arguments)};
+        if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';
+        n.queue=[];t=b.createElement(e);t.async=!0;
+        t.src=v;s=b.getElementsByTagName(e)[0];
+        s.parentNode.insertBefore(t,s)}(window, document,'script',
+        'https://connect.facebook.net/en_US/fbevents.js');
+        // Insira aqui os IDs dos seus pixels
+        // fbq('init', 'PIXEL_ID_1');
+        // fbq('init', 'PIXEL_ID_2');
+        fbq('track', 'PageView');
+        fbq('track', 'ViewContent'); // Dispara o evento ViewContent
+    <\/script>
+    </head>
+<body>
+    <p>Aguarde um instante, estamos te redirecionando...</p>
+    <script>
+        const config = {
+            API_BASE_URL: '${apiBaseUrl}',
+            sellerApiKey: '${sellerApiKey}',
+            presselId: ${pressel.id},
+            whitePageUrl: '${pressel.white_page_url}',
+            botLink: '${botLink}'
+        };
+
+        async function registerClickAndRedirect() {
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const bodyPayload = {
+                    sellerApiKey: config.sellerApiKey,
+                    presselId: config.presselId,
+                    referer: document.referrer,
+                    user_agent: navigator.userAgent,
+                    fbclid: urlParams.get('fbclid'),
+                    fbp: document.cookie.split('; ').find(row => row.startsWith('_fbp='))?.split('=')[1],
+                    fbc: document.cookie.split('; ').find(row => row.startsWith('_fbc='))?.split('=')[1],
+                    utm_source: urlParams.get('utm_source'),
+                    utm_campaign: urlParams.get('utm_campaign'),
+                    utm_medium: urlParams.get('utm_medium'),
+                    utm_content: urlParams.get('utm_content'),
+                    utm_term: urlParams.get('utm_term')
+                };
+
+                Object.keys(bodyPayload).forEach(key => (bodyPayload[key] === null || bodyPayload[key] === undefined) && delete bodyPayload[key]);
+                
+                const response = await fetch(config.API_BASE_URL + '/api/registerClick', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(bodyPayload)
                 });
 
+                if (!response.ok) throw new Error('Failed to register click');
+                
+                const data = await response.json();
+                window.location.href = config.botLink + data.click_id;
+
             } catch (error) {
-                const errorMessage = error.response?.data?.details || error.message;
-                console.error(`Falha no provedor ${position} (${provider}):`, errorMessage);
-                testLog.push(`FALHA com Provedor ${position} (${provider.toUpperCase()}): ${errorMessage}`);
+                console.error('Redirect Error:', error);
+                window.location.href = config.whitePageUrl;
             }
         }
-
-        console.error("Todos os provedores na rota de prioridade falharam.");
-        return res.status(500).json({
-            success: false,
-            message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
-            log: testLog
-        });
-
-    } catch (error) {
-        console.error(`[PIX PRIORITY TEST ERROR] Erro geral:`, error.message);
-        res.status(500).json({ 
-            success: false,
-            message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
-            log: testLog
-        });
-    }
-});
-
-
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
-async function handleSuccessfulPayment(click_id_internal, customerData) {
-    const sql = getDbConnection();
-    try {
-        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
-        if (!transaction) return;
-
-        const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
-        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
-
-        if (click && seller) {
-            const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
-            const productData = { id: "prod_final", name: "Produto Vendido" };
-
-            await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
-            await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-        }
-    } catch(error) {
-        console.error("Erro ao lidar com pagamento bem-sucedido:", error);
-    }
-}
-
-// --- WEBHOOKS ---
-app.post('/api/webhook/pushinpay', async (req, res) => {
-    const { id, status, payer_name, payer_document } = req.body;
-    if (status === 'paid') {
-        try {
-            const sql = getDbConnection();
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
-            if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.click_id_internal, { name: payer_name, document: payer_document });
-            }
-        } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
-    }
-    res.sendStatus(200);
-});
-app.post('/api/webhook/cnpay', async (req, res) => {
-    const { transactionId, status, customer } = req.body;
-    if (status === 'COMPLETED') {
-        try {
-            const sql = getDbConnection();
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
-            if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
-            }
-        } catch (error) { console.error("Erro no webhook da CNPay:", error); }
-    }
-    res.sendStatus(200);
-});
-app.post('/api/webhook/oasyfy', async (req, res) => {
-    const { transactionId, status, customer } = req.body;
-    if (status === 'COMPLETED') {
-        try {
-            const sql = getDbConnection();
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
-            if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
-            }
-        } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
-    }
-    res.sendStatus(200);
-});
-
-// --- FUNÇÃO DE ENVIO PARA UTIFY ---
-async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
-    if (!sellerData.utmify_api_token) {
-        console.log(`Vendedor ${sellerData.id} não possui token da Utmify configurado.`);
-        return;
-    }
-    const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
-    const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
-    const payload = {
-        orderId: pixData.provider_transaction_id, platform: "HotTrack", paymentMethod: 'pix',
-        status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
-        customer: {
-            name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com",
-            phone: customerData?.phone || null, document: customerData?.document || null,
-        },
-        products: [{
-            id: productData?.id || "default_product", name: productData?.name || "Produto Digital",
-            planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100)
-        }],
-        trackingParameters: {
-            src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign,
-            utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term
-        },
-        commission: {
-            totalPriceInCents: Math.round(pixData.pix_value * 100),
-            gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299),
-            userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299))
-        },
-        isTest: false
-    };
-    try {
-        await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
-            headers: { 'x-api-token': sellerData.utmify_api_token }
-        });
-        console.log(`Evento '${status}' do pedido ${payload.orderId} enviado para Utmify.`);
-    } catch (error) {
-        console.error(`Erro ao enviar evento '${status}' para a Utmify:`, error.response?.data || error.message);
-    }
-}
-
-// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
-async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
-    const sql = getDbConnection();
-    try {
-        const presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
-        if (presselPixels.length === 0) return;
-
-        const userData = {
-            client_ip_address: clickData.ip_address,
-            client_user_agent: clickData.user_agent,
-            fbp: clickData.fbp || undefined,
-            fbc: clickData.fbc || undefined,
-            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
-        };
-
-        if (customerData?.name) {
-            const nameParts = customerData.name.trim().split(' ');
-            const firstName = nameParts[0].toLowerCase();
-            const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : undefined;
-            userData.fn = crypto.createHash('sha256').update(firstName).digest('hex');
-            if (lastName) {
-                userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
-            }
-        }
-        if (customerData?.document) {
-            const cleanedDocument = customerData.document.replace(/\D/g, '');
-             userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
-        }
-
-        const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
-        const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
-        if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
-        if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
-
-        Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
-        for (const { pixel_config_id } of presselPixels) {
-            const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
-            if (pixelConfig) {
-                const { pixel_id, meta_api_token } = pixelConfig;
-                const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
-                
-                const payload = {
-                    data: [{
-                        event_name: eventName,
-                        event_time: Math.floor(Date.now() / 1000),
-                        event_id,
-                        user_data: userData,
-                        custom_data: {
-                            currency: 'BRL',
-                            value: transactionData.pix_value
-                        },
-                    }]
-                };
-                
-                if (eventName !== 'Purchase') {
-                    delete payload.data[0].custom_data.value;
-                }
+        registerClickAndRedirect();
+    <\/script>
+</body>
+</html>`;
 
-                await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
-                console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
+            const modalContent = `
+                <p class="text-sm text-gray-400 mb-4">Copie e cole este código no HTML da sua página. Lembre-se de adicionar os IDs dos seus pixels no local indicado.</p>
+                <textarea id="pressel-code-textarea" class="form-input w-full p-2 rounded-md font-mono text-xs" rows="12" readonly></textarea>
+                <button class="copy-btn btn w-full mt-4 py-2" data-target="#pressel-code-textarea">Copiar Código</button>
+            `;
+            
+            const modalContainer = document.getElementById('modal-container');
+            modalContainer.innerHTML = this.templates.modal(`Código da Pressel: ${pressel.name}`, modalContent);
+            modalContainer.querySelector('#pressel-code-textarea').value = htmlContent;
+        },
 
-                if (eventName === 'Purchase') {
-                     await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
-                }
-            }
-        }
-    } catch (error) {
-        console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data || error.message);
-    }
-}
-
-
-// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES ---
-async function checkPendingTransactions() {
-    const sql = getDbConnection();
-    try {
-        const pendingTransactions = await sql`
-            SELECT id, provider, provider_transaction_id, click_id_internal
-            FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '24 hours'`;
-
-        if (pendingTransactions.length === 0) return;
-        
-        for (const tx of pendingTransactions) {
+        async testIndividualPixConnection(provider, button) {
+            const originalText = button.innerHTML;
+            button.innerHTML = 'Testando...';
+            button.disabled = true;
+            this.updatePixStatusIndicator(provider, 'testing');
+            
+            const form = document.getElementById('pixSettingsForm');
+            const formData = Object.fromEntries(new FormData(form).entries());
             try {
-                const [seller] = await sql`
-                    SELECT pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key
-                    FROM sellers s JOIN clicks c ON c.seller_id = s.id
-                    WHERE c.id = ${tx.click_id_internal}`;
-                if (!seller) continue;
-
-                let providerStatus, customerData = {};
-                if (tx.provider === 'pushinpay') {
-                    const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
-                    providerStatus = response.data.status;
-                    customerData = { name: response.data.payer_name, document: response.data.payer_document };
-                } else if (tx.provider === 'cnpay') {
-                    const response = await axios.get(`https://painel.appcnpay.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
-                    providerStatus = response.data.status;
-                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
-                } else if (tx.provider === 'oasyfy') {
-                    const response = await axios.get(`https://app.oasyfy.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
-                    providerStatus = response.data.status;
-                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
-                }
-                
-                if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
-                     await handleSuccessfulPayment(tx.click_id_internal, customerData);
-                }
-            } catch (error) {
-                console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
+                await this.apiRequest('/api/settings/pix', 'POST', formData);
+                App.state.data.settings = { ...App.state.data.settings, ...formData };
+            } catch (e) {
+                this.showToast('Erro ao salvar as configurações antes do teste.', 'error');
+                button.innerHTML = originalText;
+                button.disabled = false;
+                this.updatePixStatusIndicator(provider);
+                return;
             }
+
+            try {
+                const result = await this.apiRequest('/api/pix/test-provider', 'POST', { provider });
+                localStorage.setItem(`pix_status_${provider}`, 'success');
+                localStorage.setItem(`pix_timestamp_${provider}`, Date.now());
+                
+                const successModalContent = `
+                    <div class="space-y-4 text-sm">
+                        <div class="flex justify-between items-center"><span class="font-semibold text-gray-400">Provedor:</span> <span class="text-white">${result.provider}</span></div>
+                        <div class="flex justify-between items-center"><span class="font-semibold text-gray-400">Adquirente:</span> <span class="text-white">${result.acquirer}</span></div>
+                        <div class="flex justify-between items-center"><span class="font-semibold text-gray-400">Tempo de Resposta:</span> <span class="text-white">${result.responseTime}s</span></div>
+                        <hr class="border-slate-700">
+                        <div>
+                            <p class="font-semibold text-gray-400 mb-2">PIX Copia e Cola (R$ 0,05):</p>
+                            <textarea id="pix-test-key" class="form-input w-full p-2 rounded-md font-mono text-xs" rows="4" readonly>${result.qr_code_text}</textarea>
+                            <button class="copy-btn btn w-full mt-2 py-2 text-sm" data-target="#pix-test-key">Copiar Chave PIX</button>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('modal-container').innerHTML = this.templates.modal('Conexão Bem-sucedida!', successModalContent);
+
+            } catch (error) {
+                localStorage.setItem(`pix_status_${provider}`, 'failure');
+                localStorage.setItem(`pix_timestamp_${provider}`, Date.now());
+                const errorModalContent = `<div class="text-center"><p class="text-lg font-medium text-red-400 mb-2">Falha na Conexão</p><p class="text-sm text-gray-400">${error.message || 'Ocorreu um erro desconhecido.'}</p></div>`;
+                document.getElementById('modal-container').innerHTML = this.templates.modal('Erro no Teste', errorModalContent);
+            } finally {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                this.updatePixStatusIndicator(provider);
+            }
+        },
+        
+        async testPriorityRoute(button) {
+            const originalText = button.innerHTML;
+            button.innerHTML = 'Testando Rota...';
+            button.disabled = true;
+
+            const form = document.getElementById('pixSettingsForm');
+            const formData = Object.fromEntries(new FormData(form).entries());
+            try {
+                await this.apiRequest('/api/settings/pix', 'POST', formData);
+                App.state.data.settings = { ...App.state.data.settings, ...formData };
+            } catch (e) {
+                this.showToast('Erro ao salvar as configurações antes do teste.', 'error');
+                button.innerHTML = originalText;
+                button.disabled = false;
+                return;
+            }
+
+            try {
+                const result = await this.apiRequest('/api/pix/test-priority-route', 'POST');
+                const logHTML = result.log.map(line => {
+                    const color = line.startsWith('SUCESSO') ? 'text-green-400' : 'text-red-400';
+                    return `<li class="${color}">${line}</li>`;
+                }).join('');
+
+                const successModalContent = `
+                    <div class="space-y-4 text-sm">
+                        <div class="flex justify-between items-center"><span class="font-semibold text-gray-400">Provedor de Sucesso:</span> <span class="text-white">${result.provider} (${result.position})</span></div>
+                        <div class="flex justify-between items-center"><span class="font-semibold text-gray-400">Tempo de Resposta:</span> <span class="text-white">${result.responseTime}s</span></div>
+                        <hr class="border-slate-700">
+                        <div>
+                            <p class="font-semibold text-gray-400 mb-2">Log de Tentativas:</p>
+                            <ul class="text-xs font-mono list-disc list-inside space-y-1">${logHTML}</ul>
+                        </div>
+                        <hr class="border-slate-700">
+                        <div>
+                            <p class="font-semibold text-gray-400 mb-2">PIX Copia e Cola (R$ 0,05):</p>
+                            <textarea id="pix-test-key" class="form-input w-full p-2 rounded-md font-mono text-xs" rows="3" readonly>${result.qr_code_text}</textarea>
+                            <button class="copy-btn btn w-full mt-2 py-2 text-sm" data-target="#pix-test-key">Copiar Chave PIX</button>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('modal-container').innerHTML = this.templates.modal('Teste da Rota Concluído!', successModalContent);
+
+            } catch (error) {
+                const logHTML = error.log ? error.log.map(line => `<li class="text-red-400">${line}</li>`).join('') : '<li>Nenhum log disponível.</li>';
+                const errorModalContent = `
+                    <div class="space-y-4 text-sm">
+                         <p class="text-lg font-medium text-red-400 text-center mb-2">Falha na Rota de Prioridade</p>
+                         <p class="text-gray-400 text-center">${error.message}</p>
+                         <hr class="border-slate-700">
+                         <div>
+                            <p class="font-semibold text-gray-400 mb-2">Log de Tentativas:</p>
+                            <ul class="text-xs font-mono list-disc list-inside space-y-1">${logHTML}</ul>
+                        </div>
+                    </div>
+                `;
+                document.getElementById('modal-container').innerHTML = this.templates.modal('Erro no Teste', errorModalContent);
+            } finally {
+                button.innerHTML = originalText;
+                button.disabled = false;
+            }
+        },
+
+        async testBotConnection(botId, button) {
+            const originalText = button.innerHTML;
+            button.innerHTML = '...';
+            button.disabled = true;
+            this.updateBotStatusIndicator(botId, 'testing');
+
+            try {
+                const result = await this.apiRequest('/api/bots/test-connection', 'POST', { bot_id: botId });
+                localStorage.setItem(`bot_status_${botId}`, 'success');
+                localStorage.setItem(`bot_timestamp_${botId}`, Date.now());
+                this.showToast(result.message, 'success');
+            } catch (error) {
+                localStorage.setItem(`bot_status_${botId}`, 'failure');
+                localStorage.setItem(`bot_timestamp_${botId}`, Date.now());
+            } finally {
+                button.innerHTML = originalText;
+                button.disabled = false;
+                this.updateBotStatusIndicator(botId);
+            }
+        },
+
+        updateAllBotStatusIndicators() {
+            if (this.state.data.bots && this.state.data.bots.length > 0) {
+                this.state.data.bots.forEach(bot => {
+                    this.updateBotStatusIndicator(bot.id);
+                });
+            }
+        },
+        
+        updateBotStatusIndicator(botId, mode) {
+            const indicator = document.getElementById(`status-indicator-bot-${botId}`);
+            if (!indicator) return;
+
+            if (mode === 'testing') {
+                indicator.textContent = 'Testando...';
+                indicator.className = 'status-indicator testing';
+                return;
+            }
+
+            const status = localStorage.getItem(`bot_status_${botId}`);
+            const timestamp = localStorage.getItem(`bot_timestamp_${botId}`);
+
+            if (status === 'success' && timestamp) {
+                indicator.textContent = `Online (${this.formatTimeAgo(timestamp)})`;
+                indicator.className = 'status-indicator success';
+            } else if (status === 'failure' && timestamp) {
+                indicator.textContent = `Offline (${this.formatTimeAgo(timestamp)})`;
+                indicator.className = 'status-indicator failure';
+            } else {
+                indicator.textContent = 'Não testado';
+                indicator.className = 'status-indicator unknown';
+            }
+        },
+
+        updateAllPixStatusIndicators() {
+            const providers = ['pushinpay', 'cnpay', 'oasyfy'];
+            providers.forEach(provider => this.updatePixStatusIndicator(provider));
+        },
+
+        updatePixStatusIndicator(provider, mode) {
+             const indicator = document.getElementById(`status-indicator-${provider}`);
+            if (!indicator) return;
+
+            if (mode === 'testing') {
+                indicator.textContent = 'Testando...';
+                indicator.className = 'status-indicator testing';
+                return;
+            }
+
+            const status = localStorage.getItem(`pix_status_${provider}`);
+            const timestamp = localStorage.getItem(`pix_timestamp_${provider}`);
+
+            if (status === 'success' && timestamp) {
+                indicator.textContent = `Ativo (Testado ${this.formatTimeAgo(timestamp)})`;
+                indicator.className = 'status-indicator success';
+            } else if (status === 'failure' && timestamp) {
+                indicator.textContent = `Falhou (Testado ${this.formatTimeAgo(timestamp)})`;
+                indicator.className = 'status-indicator failure';
+            } else {
+                indicator.textContent = 'Não testado';
+                indicator.className = 'status-indicator unknown';
+            }
+        },
+
+        formatTimeAgo(timestamp) {
+            const seconds = Math.floor((Date.now() - timestamp) / 1000);
+            if (seconds < 60) return "agora";
+            const minutes = Math.floor(seconds / 60);
+            if (minutes < 60) return `há ${minutes} min`;
+            const hours = Math.floor(minutes / 60);
+            if (hours < 24) return `há ${hours}h`;
+            const days = Math.floor(hours / 24);
+            return `há ${days}d`;
+        },
+        
+        showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            let bgColor = '';
+            switch(type) {
+                case 'success': bgColor = 'bg-green-600'; break;
+                case 'error': bgColor = 'bg-red-600'; break;
+                case 'info': bgColor = 'bg-sky-600'; break;
+                default: bgColor = 'bg-gray-700';
+            }
+            toast.className = `fixed bottom-5 right-5 ${bgColor} text-white py-2 px-4 rounded-lg shadow-lg animate-fade-in z-50`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.addEventListener('transitionend', () => toast.remove());
+            }, 5000);
         }
-    } catch (error) {
-        console.error("Erro na rotina de verificação geral:", error.message);
-    }
-}
-setInterval(checkPendingTransactions, 120000);
+    };
 
-// --- ROTAS DO PAINEL ADMINISTRATIVO ---
-function authenticateAdmin(req, res, next) {
-    const adminKey = req.headers['x-admin-api-key'];
-    if (!adminKey || adminKey !== ADMIN_API_KEY) {
-        return res.status(403).json({ message: 'Acesso negado. Chave de administrador inválida.' });
-    }
-    next();
-}
-
-app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const totalSellers = await sql`SELECT COUNT(*) FROM sellers;`;
-        const paidTransactions = await sql`SELECT COUNT(*) as count, SUM(pix_value) as total_revenue FROM pix_transactions WHERE status = 'paid';`;
-        const total_sellers = parseInt(totalSellers[0].count);
-        const total_paid_transactions = parseInt(paidTransactions[0].count);
-        const total_revenue = parseFloat(paidTransactions[0].total_revenue || 0);
-        const saas_profit = total_revenue * 0.0299;
-        res.json({
-            total_sellers, total_paid_transactions,
-            total_revenue: total_revenue.toFixed(2),
-            saas_profit: saas_profit.toFixed(2)
-        });
-    } catch (error) {
-        console.error("Erro no dashboard admin:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados do dashboard.' });
-    }
-});
-app.get('/api/admin/ranking', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const ranking = await sql`
-            SELECT s.id, s.name, s.email, COUNT(pt.id) AS total_sales, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
-            FROM sellers s LEFT JOIN clicks c ON s.id = c.seller_id
-            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
-            GROUP BY s.id, s.name, s.email ORDER BY total_revenue DESC LIMIT 20;`;
-        res.json(ranking);
-    } catch (error) {
-        console.error("Erro no ranking de sellers:", error);
-        res.status(500).json({ message: 'Erro ao buscar ranking.' });
-    }
-});
-app.get('/api/admin/sellers', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const sellers = await sql`SELECT id, name, email, created_at, is_active FROM sellers ORDER BY created_at DESC;`;
-        res.json(sellers);
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao listar vendedores.' });
-    }
-});
-app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { isActive } = req.body;
-    try {
-        await sql`UPDATE sellers SET is_active = ${isActive} WHERE id = ${id};`;
-        res.status(200).json({ message: `Usuário ${isActive ? 'ativado' : 'bloqueado'} com sucesso.` });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar status do usuário.' });
-    }
-});
-app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { newPassword } = req.body;
-    if (!newPassword || newPassword.length < 8) return res.status(400).json({ message: 'A nova senha deve ter pelo menos 8 caracteres.' });
-    try {
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await sql`UPDATE sellers SET password_hash = ${hashedPassword} WHERE id = ${id};`;
-        res.status(200).json({ message: 'Senha alterada com sucesso.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar senha.' });
-    }
-});
-app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { pushinpay_token, cnpay_public_key, cnpay_secret_key } = req.body;
-    try {
-        await sql`
-            UPDATE sellers 
-            SET pushinpay_token = ${pushinpay_token}, cnpay_public_key = ${cnpay_public_key}, cnpay_secret_key = ${cnpay_secret_key}
-            WHERE id = ${id};`;
-        res.status(200).json({ message: 'Credenciais alteradas com sucesso.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar credenciais.' });
-    }
-});
-app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const page = parseInt(req.query.page || 1);
-        const limit = parseInt(req.query.limit || 20);
-        const offset = (page - 1) * limit;
-        const transactions = await sql`
-            SELECT pt.id, pt.status, pt.pix_value, pt.provider, pt.created_at, s.name as seller_name, s.email as seller_email
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
-            JOIN sellers s ON c.seller_id = s.id ORDER BY pt.created_at DESC
-            LIMIT ${limit} OFFSET ${offset};`;
-         const totalTransactionsResult = await sql`SELECT COUNT(*) FROM pix_transactions;`;
-         const total = parseInt(totalTransactionsResult[0].count);
-        res.json({ transactions, total, page, pages: Math.ceil(total / limit), limit });
-    } catch (error) {
-        console.error("Erro ao buscar transações admin:", error);
-        res.status(500).json({ message: 'Erro ao buscar transações.' });
-    }
-});
-
-app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const usageData = await sql`
-            SELECT
-                s.id, s.name, s.email,
-                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '1 hour') AS requests_last_hour,
-                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '24 hours') AS requests_last_24_hours
-            FROM sellers s
-            LEFT JOIN api_requests ar ON s.id = ar.seller_id
-            GROUP BY s.id, s.name, s.email
-            ORDER BY requests_last_24_hours DESC, requests_last_hour DESC;
-        `;
-        res.json(usageData);
-    } catch (error) {
-        console.error("Erro na análise de uso:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
-    }
-});
-
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-module.exports = app;
+    App.init();
+    </script>
+</body>
+</html>
