@@ -656,7 +656,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
-async function handleSuccessfulPayment(click_id_internal) {
+async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
         const [transaction] = await sql`SELECT * FROM pix_transactions WHERE click_id_internal = ${click_id_internal} AND status = 'paid' ORDER BY paid_at DESC LIMIT 1`;
@@ -666,11 +666,11 @@ async function handleSuccessfulPayment(click_id_internal) {
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
 
         if (click && seller) {
-            const customerData = { name: "Cliente Pagante", email: "cliente@email.com", phone: "11912345678", document: "12345678900" };
+            const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
             const productData = { id: "prod_final", name: "Produto Vendido" };
 
-            await sendEventToUtmify('paid', click, transaction, seller, customerData, productData);
-            await sendConversionToMeta(click, transaction);
+            await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
+            await sendConversionToMeta(click, transaction, finalCustomerData);
         }
     } catch(error) {
         console.error("Erro ao lidar com pagamento bem-sucedido:", error);
@@ -679,39 +679,39 @@ async function handleSuccessfulPayment(click_id_internal) {
 
 // --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
-    const { id, status } = req.body;
+    const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
         try {
             const sql = getDbConnection();
             const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${id} AND provider = 'pushinpay' AND status != 'paid' RETURNING *`;
             if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal);
+                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: payer_name, document: payer_document });
             }
         } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
     }
     res.sendStatus(200);
 });
 app.post('/api/webhook/cnpay', async (req, res) => {
-    const { transactionId, status } = req.body;
+    const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
             const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay' AND status != 'paid' RETURNING *`;
             if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal);
+                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: customer?.name, document: customer?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da CNPay:", error); }
     }
     res.sendStatus(200);
 });
 app.post('/api/webhook/oasyfy', async (req, res) => {
-    const { transactionId, status } = req.body;
+    const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
             const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy' AND status != 'paid' RETURNING *`;
             if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal);
+                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: customer?.name, document: customer?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
     }
@@ -759,42 +759,72 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
 }
 
 // --- FUNÇÃO DE ENVIO PARA META ---
-async function sendConversionToMeta(clickData, pixData) {
+async function sendConversionToMeta(clickData, pixData, customerData) {
     const sql = getDbConnection();
     try {
         const presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
         if (presselPixels.length === 0) return;
-        const externalId = clickData.click_id ? clickData.click_id.replace('/start ', '') : null;
+
+        const userData = {
+            client_ip_address: clickData.ip_address,
+            client_user_agent: clickData.user_agent,
+            fbp: clickData.fbp,
+            fbc: clickData.fbc,
+            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : null
+        };
+
+        // Adiciona dados demográficos se disponíveis
+        if (customerData?.name) {
+            const nameParts = customerData.name.trim().split(' ');
+            const firstName = nameParts[0].toLowerCase();
+            const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : null;
+            userData.fn = crypto.createHash('sha256').update(firstName).digest('hex');
+            if(lastName) {
+                userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
+            }
+        }
+        if (customerData?.document) {
+            const cleanedDocument = customerData.document.replace(/\D/g, '');
+            userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
+        }
+
+        // Adiciona localização se disponível
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
-        const gender = 'm';
+        if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
+        if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
+
+        Object.keys(userData).forEach(key => (userData[key] === null || userData[key] === undefined) && delete userData[key]);
+        
         for (const { pixel_config_id } of presselPixels) {
             const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
             if (pixelConfig) {
                 const { pixel_id, meta_api_token } = pixelConfig;
                 const event_id = `pix.${pixData.id}.${pixel_id}`;
-                const userData = {
-                    external_id: externalId, fbp: clickData.fbp, fbc: clickData.fbc,
-                    client_ip_address: clickData.ip_address, client_user_agent: clickData.user_agent,
-                    ge: crypto.createHash('sha256').update(gender).digest('hex'),
-                    ct: city ? crypto.createHash('sha256').update(city).digest('hex') : null,
-                    st: state ? crypto.createHash('sha256').update(state).digest('hex') : null,
-                };
-                Object.keys(userData).forEach(key => (userData[key] === null || userData[key] === undefined) && delete userData[key]);
+                
                 const payload = {
                     data: [{
-                        event_name: 'Purchase', event_time: Math.floor(Date.now() / 1000),
-                        event_id, user_data: userData, custom_data: { currency: 'BRL', value: pixData.pix_value },
+                        event_name: 'Purchase',
+                        event_time: Math.floor(Date.now() / 1000),
+                        event_id,
+                        user_data: userData,
+                        custom_data: {
+                            currency: 'BRL',
+                            value: pixData.pix_value
+                        },
                     }]
                 };
+
                 await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
                 await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${pixData.id}`;
+                console.log(`Evento de compra enviado para o Pixel ID ${pixel_id} com dados do cliente.`);
             }
         }
     } catch (error) {
         console.error('Erro ao enviar conversão para a Meta:', error.response?.data || error.message);
     }
 }
+
 
 // --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES ---
 async function checkPendingTransactions() {
@@ -814,21 +844,25 @@ async function checkPendingTransactions() {
                     WHERE c.id = ${tx.click_id_internal}`;
                 if (!seller) continue;
 
-                let providerStatus;
+                let providerStatus, customerData = {};
                 if (tx.provider === 'pushinpay') {
                     const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                     providerStatus = response.data.status;
+                    customerData = { name: response.data.payer_name, document: response.data.payer_document };
                 } else if (tx.provider === 'cnpay') {
                     const response = await axios.get(`https://painel.appcnpay.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
                     providerStatus = response.data.status;
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID };
                 } else if (tx.provider === 'oasyfy') {
                     const response = await axios.get(`https://app.oasyfy.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
                     providerStatus = response.data.status;
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID };
                 }
+                
                 if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
                     const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${tx.id} AND status != 'paid' RETURNING *`;
                     if (updatedTx) {
-                        await handleSuccessfulPayment(updatedTx.click_id_internal);
+                        await handleSuccessfulPayment(updatedTx.click_id_internal, customerData);
                     }
                 }
             } catch (error) {
