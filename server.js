@@ -586,6 +586,75 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
 });
 
 
+// --- ROTA PARA TESTAR A ROTA DE PRIORIDADE ---
+app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const sellerId = req.user.id;
+    let testLog = [];
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        
+        const providerOrder = [
+            { name: seller.pix_provider_primary, position: 'Primário' },
+            { name: seller.pix_provider_secondary, position: 'Secundário' },
+            { name: seller.pix_provider_tertiary, position: 'Terciário' }
+        ].filter(p => p.name); 
+
+        if (providerOrder.length === 0) {
+            return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
+        }
+
+        const value_cents = 50;
+
+        for (const providerInfo of providerOrder) {
+            const provider = providerInfo.name;
+            const position = providerInfo.position;
+            
+            try {
+                console.log(`Testando provedor ${position}: ${provider}`);
+                const startTime = Date.now();
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                const endTime = Date.now();
+                const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+
+                testLog.push(`SUCESSO com Provedor ${position} (${provider.toUpperCase()}).`);
+                return res.status(200).json({
+                    success: true,
+                    position: position,
+                    provider: provider.toUpperCase(),
+                    acquirer: pixResult.acquirer,
+                    responseTime: responseTime,
+                    qr_code_text: pixResult.qr_code_text,
+                    log: testLog
+                });
+
+            } catch (error) {
+                const errorMessage = error.response?.data?.details || error.message;
+                console.error(`Falha no provedor ${position} (${provider}):`, errorMessage);
+                testLog.push(`FALHA com Provedor ${position} (${provider.toUpperCase()}): ${errorMessage}`);
+            }
+        }
+
+        console.error("Todos os provedores na rota de prioridade falharam.");
+        return res.status(500).json({
+            success: false,
+            message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
+            log: testLog
+        });
+
+    } catch (error) {
+        console.error(`[PIX PRIORITY TEST ERROR] Erro geral:`, error.message);
+        res.status(500).json({ 
+            success: false,
+            message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
+            log: testLog
+        });
+    }
+});
+
+
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal) {
     const sql = getDbConnection();
