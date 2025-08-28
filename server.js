@@ -575,7 +575,7 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE GERAÇÃO DE PIX (CORRIGIDA) ---
+// --- ROTA DE GERAÇÃO DE PIX ---
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -873,7 +873,7 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 
-// --- FUNÇÃO GENÉRICA DE ENVIO PARA META (CORRIGIDA) ---
+// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
