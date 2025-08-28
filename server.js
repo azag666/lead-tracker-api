@@ -525,6 +525,9 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
                 
                 await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
                 
+                // Enviar evento InitiateCheckout para a Meta
+                await sendMetaEvent('InitiateCheckout', click, { pix_value: value_cents / 100 }, null);
+
                 const customerDataForUtmify = customer || { name: "Cliente Interessado", email: "cliente@email.com" };
                 const productDataForUtmify = product || { id: "prod_1", name: "Produto Ofertado" };
                 await sendEventToUtmify('waiting_payment', click, { provider_transaction_id: pixResult.transaction_id, pix_value: value_cents / 100, created_at: new Date() }, seller, customerDataForUtmify, productDataForUtmify);
@@ -659,7 +662,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
-        const [transaction] = await sql`SELECT * FROM pix_transactions WHERE click_id_internal = ${click_id_internal} AND status = 'paid' ORDER BY paid_at DESC LIMIT 1`;
+        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
         if (!transaction) return;
 
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
@@ -670,7 +673,7 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
             const productData = { id: "prod_final", name: "Produto Vendido" };
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
-            await sendConversionToMeta(click, transaction, finalCustomerData);
+            await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
         }
     } catch(error) {
         console.error("Erro ao lidar com pagamento bem-sucedido:", error);
@@ -683,9 +686,9 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
     if (status === 'paid') {
         try {
             const sql = getDbConnection();
-            const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${id} AND provider = 'pushinpay' AND status != 'paid' RETURNING *`;
-            if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: payer_name, document: payer_document });
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: payer_name, document: payer_document });
             }
         } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
     }
@@ -696,9 +699,9 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
-            const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay' AND status != 'paid' RETURNING *`;
-            if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: customer?.name, document: customer?.taxID });
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da CNPay:", error); }
     }
@@ -709,9 +712,9 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
-            const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy' AND status != 'paid' RETURNING *`;
-            if (updatedTx) {
-                await handleSuccessfulPayment(updatedTx.click_id_internal, { name: customer?.name, document: customer?.taxID });
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
     }
@@ -758,8 +761,8 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 
-// --- FUNÇÃO DE ENVIO PARA META ---
-async function sendConversionToMeta(clickData, pixData, customerData) {
+// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
+async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
         const presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
@@ -768,60 +771,66 @@ async function sendConversionToMeta(clickData, pixData, customerData) {
         const userData = {
             client_ip_address: clickData.ip_address,
             client_user_agent: clickData.user_agent,
-            fbp: clickData.fbp,
-            fbc: clickData.fbc,
-            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : null
+            fbp: clickData.fbp || undefined,
+            fbc: clickData.fbc || undefined,
+            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
         };
 
-        // Adiciona dados demográficos se disponíveis
         if (customerData?.name) {
             const nameParts = customerData.name.trim().split(' ');
             const firstName = nameParts[0].toLowerCase();
-            const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : null;
+            const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : undefined;
             userData.fn = crypto.createHash('sha256').update(firstName).digest('hex');
-            if(lastName) {
+            if (lastName) {
                 userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
             }
         }
         if (customerData?.document) {
             const cleanedDocument = customerData.document.replace(/\D/g, '');
-            userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
+             userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
         }
 
-        // Adiciona localização se disponível
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
         if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
         if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
 
-        Object.keys(userData).forEach(key => (userData[key] === null || userData[key] === undefined) && delete userData[key]);
-        
+        Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
+
         for (const { pixel_config_id } of presselPixels) {
             const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
             if (pixelConfig) {
                 const { pixel_id, meta_api_token } = pixelConfig;
-                const event_id = `pix.${pixData.id}.${pixel_id}`;
+                const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
                 
                 const payload = {
                     data: [{
-                        event_name: 'Purchase',
+                        event_name: eventName,
                         event_time: Math.floor(Date.now() / 1000),
                         event_id,
                         user_data: userData,
                         custom_data: {
                             currency: 'BRL',
-                            value: pixData.pix_value
+                            value: transactionData.pix_value
                         },
                     }]
                 };
+                
+                // O campo 'value' não é recomendado para InitiateCheckout, então o removemos.
+                if (eventName !== 'Purchase') {
+                    delete payload.data[0].custom_data.value;
+                }
 
                 await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
-                await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${pixData.id}`;
-                console.log(`Evento de compra enviado para o Pixel ID ${pixel_id} com dados do cliente.`);
+                console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
+
+                if (eventName === 'Purchase') {
+                     await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+                }
             }
         }
     } catch (error) {
-        console.error('Erro ao enviar conversão para a Meta:', error.response?.data || error.message);
+        console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data || error.message);
     }
 }
 
@@ -852,18 +861,15 @@ async function checkPendingTransactions() {
                 } else if (tx.provider === 'cnpay') {
                     const response = await axios.get(`https://painel.appcnpay.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
                     providerStatus = response.data.status;
-                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID };
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
                 } else if (tx.provider === 'oasyfy') {
                     const response = await axios.get(`https://app.oasyfy.com/api/v1/gateway/pix/receive/${tx.provider_transaction_id}`, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
                     providerStatus = response.data.status;
-                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID };
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
                 }
                 
-                if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
-                    const [updatedTx] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${tx.id} AND status != 'paid' RETURNING *`;
-                    if (updatedTx) {
-                        await handleSuccessfulPayment(updatedTx.click_id_internal, customerData);
-                    }
+                if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
+                     await handleSuccessfulPayment(tx.click_id_internal, customerData);
                 }
             } catch (error) {
                 console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
