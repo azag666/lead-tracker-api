@@ -186,6 +186,41 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     }
 });
 
+// NOVA ROTA PARA TESTAR CONEXÃO DO BOT
+app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { bot_id } = req.body;
+    if (!bot_id) return res.status(400).json({ message: 'ID do bot é obrigatório.' });
+
+    try {
+        const [bot] = await sql`SELECT bot_token, bot_name FROM telegram_bots WHERE id = ${bot_id} AND seller_id = ${req.user.id}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
+        }
+
+        const response = await axios.get(`https://api.telegram.org/bot${bot.bot_token}/getMe`);
+        
+        if (response.data.ok) {
+            res.status(200).json({ 
+                message: `Conexão com o bot @${response.data.result.username} bem-sucedida!`,
+                bot_info: response.data.result
+            });
+        } else {
+            throw new Error('A API do Telegram retornou um erro.');
+        }
+
+    } catch (error) {
+        console.error(`[BOT TEST ERROR] Bot ID: ${bot_id} - Erro:`, error.response?.data || error.message);
+        let errorMessage = 'Falha ao conectar com o bot. Verifique o token e tente novamente.';
+        if (error.response?.status === 401) {
+            errorMessage = 'Token inválido. Verifique se o token do bot foi copiado corretamente do BotFather.';
+        } else if (error.response?.status === 404) {
+            errorMessage = 'Bot não encontrado. O token pode estar incorreto ou o bot foi deletado.';
+        }
+        res.status(500).json({ message: errorMessage });
+    }
+});
+
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
