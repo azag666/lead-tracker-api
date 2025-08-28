@@ -182,9 +182,17 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
             JOIN telegram_bots b ON p.bot_id = b.id
             WHERE p.seller_id = ${sellerId} ORDER BY p.created_at DESC`;
         const botsPromise = sql`SELECT * FROM telegram_bots WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
-        const [settingsResult, pixels, pressels, bots] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise]);
+        // NOVA PROMISE PARA BUSCAR OS CHECKOUTS
+        const checkoutsPromise = sql`
+            SELECT c.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids
+            FROM checkouts c
+            LEFT JOIN ( SELECT checkout_id, array_agg(pixel_config_id) as pixel_ids FROM checkout_pixels GROUP BY checkout_id ) px ON c.id = px.checkout_id
+            WHERE c.seller_id = ${sellerId} ORDER BY c.created_at DESC`;
+
+        const [settingsResult, pixels, pressels, bots, checkouts] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise]);
+        
         const settings = settingsResult[0] || {};
-        res.json({ settings, pixels, pressels, bots });
+        res.json({ settings, pixels, pressels, bots, checkouts }); // Adiciona checkouts na resposta
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
         res.status(500).json({ message: 'Erro ao buscar dados.' });
@@ -322,6 +330,53 @@ app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     }
 });
 
+// --- NOVAS ROTAS DE CRUD PARA CHECKOUTS ---
+app.post('/api/checkouts', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
+
+    if (!name || !product_name || !redirect_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) {
+        return res.status(400).json({ message: 'Nome, Nome do Produto, URL de Redirecionamento e ao menos um Pixel são obrigatórios.' });
+    }
+    if (value_type === 'fixed' && (!fixed_value_cents || fixed_value_cents <= 0)) {
+        return res.status(400).json({ message: 'Para valor fixo, o valor em centavos deve ser maior que zero.' });
+    }
+
+    try {
+        await sql`BEGIN`; // Inicia uma transação para garantir a consistência dos dados
+
+        const [newCheckout] = await sql`
+            INSERT INTO checkouts (seller_id, name, product_name, redirect_url, value_type, fixed_value_cents)
+            VALUES (${req.user.id}, ${name}, ${product_name}, ${redirect_url}, ${value_type}, ${value_type === 'fixed' ? fixed_value_cents : null})
+            RETURNING *;
+        `;
+
+        for (const pixelId of pixel_ids) {
+            await sql`INSERT INTO checkout_pixels (checkout_id, pixel_config_id) VALUES (${newCheckout.id}, ${pixelId})`;
+        }
+        
+        await sql`COMMIT`; // Confirma a transação
+
+        res.status(201).json({ ...newCheckout, pixel_ids: pixel_ids.map(id => parseInt(id)) });
+    } catch (error) {
+        await sql`ROLLBACK`; // Desfaz a transação em caso de erro
+        console.error("Erro ao salvar checkout:", error);
+        res.status(500).json({ message: 'Erro interno ao salvar o checkout.' });
+    }
+});
+
+app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        await sql`DELETE FROM checkouts WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao excluir checkout:", error);
+        res.status(500).json({ message: 'Erro ao excluir o checkout.' });
+    }
+});
+
+
 // --- ROTAS DE CONFIGURAÇÃO ---
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -361,12 +416,13 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE RASTREAMENTO E CONSULTAS ---
+// --- ROTA DE RASTREAMENTO E CONSULTAS (ATUALIZADA) ---
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
-    const { sellerApiKey, presselId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
+    // Adicionado 'checkoutId' aos dados recebidos
+    const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
     
-    if (!sellerApiKey || !presselId) return res.status(400).json({ message: 'Dados insuficientes.' });
+    if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
     
     const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
     let city = 'Desconhecida', state = 'Desconhecido';
@@ -379,21 +435,32 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
     } catch (e) { console.error("Erro ao buscar geolocalização:", e.message); }
     
     try {
+        // Query de inserção atualizada para incluir 'checkout_id'
         const result = await sql`INSERT INTO clicks (
-            seller_id, pressel_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
+            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
         ) 
         SELECT
-            s.id, ${presselId}, ${ip_address}, ${user_agent}, ${referer}, ${city}, ${state}, ${fbclid}, ${fbp}, ${fbc},
+            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${city}, ${state}, ${fbclid}, ${fbp}, ${fbc},
             ${utm_source || null}, ${utm_campaign || null}, ${utm_medium || null}, ${utm_content || null}, ${utm_term || null}
-        FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING id;`;
+        FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING *;`;
         
-        if (result.length === 0) return res.status(404).json({ message: 'API Key ou Pressel inválida.' });
+        if (result.length === 0) return res.status(404).json({ message: 'API Key inválida.' });
         
-        const click_record_id = result[0].id;
+        const newClick = result[0];
+        const click_record_id = newClick.id;
         const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
         const db_click_id = `/start ${clean_click_id}`;
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
+
+        // DISPARO DO EVENTO DE INITIATE CHECKOUT
+        if (checkoutId) {
+            // Buscamos o valor do produto para enviar no evento, caso seja fixo
+            const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
+            const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
+            
+            await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
+        }
         
         res.status(200).json({ status: 'success', click_id: clean_click_id });
     } catch (error) {
@@ -401,6 +468,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
+
 
 app.post('/api/click/info', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
@@ -442,7 +510,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate;
 
-        // Versões condicionais das consultas
         const totalClicksResult = hasDateFilter
             ? await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
             : await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId}`;
@@ -493,12 +560,19 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
+        // Query ajustada para mostrar a origem (Pressel ou Checkout)
         const transactions = await sql`
-            SELECT pt.status, pt.pix_value, tb.bot_name, pt.provider, pt.created_at
+            SELECT 
+                pt.status, 
+                pt.pix_value, 
+                COALESCE(tb.bot_name, ch.name) as source_name, 
+                pt.provider, 
+                pt.created_at
             FROM pix_transactions pt
             JOIN clicks c ON pt.click_id_internal = c.id
-            JOIN pressels p ON c.pressel_id = p.id
-            JOIN telegram_bots tb ON p.bot_id = tb.id
+            LEFT JOIN pressels p ON c.pressel_id = p.id
+            LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
+            LEFT JOIN checkouts ch ON c.checkout_id = ch.id
             WHERE c.seller_id = ${sellerId}
             ORDER BY pt.created_at DESC;`;
         res.status(200).json(transactions);
@@ -537,7 +611,11 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
                 
                 const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
-                await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
+                // O evento InitiateCheckout já foi enviado na rota /registerClick para checkouts.
+                // Mantemos aqui para pressels que possam gerar pix direto no futuro.
+                if (click.pressel_id) {
+                    await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
+                }
 
                 const customerDataForUtmify = customer || { name: "Cliente Interessado", email: "cliente@email.com" };
                 const productDataForUtmify = product || { id: "prod_1", name: "Produto Ofertado" };
@@ -669,7 +747,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (PURCHASE) ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
@@ -684,6 +762,7 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
             const productData = { id: "prod_final", name: "Produto Vendido" };
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
+            // Dispara o evento de Purchase para a Meta
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
         }
     } catch(error) {
@@ -772,12 +851,22 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 
-// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
+// --- FUNÇÃO GENÉRICA DE ENVIO PARA META (ATUALIZADA) ---
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
-        const presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
-        if (presselPixels.length === 0) return;
+        let presselPixels = [];
+        // Lógica para buscar os pixels corretos, seja de um pressel ou de um checkout
+        if (clickData.pressel_id) {
+            presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
+        } else if (clickData.checkout_id) {
+            presselPixels = await sql`SELECT pixel_config_id FROM checkout_pixels WHERE checkout_id = ${clickData.checkout_id}`;
+        }
+
+        if (presselPixels.length === 0) {
+            console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}.`);
+            return;
+        }
 
         const userData = {
             client_ip_address: clickData.ip_address,
@@ -791,20 +880,20 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             const nameParts = customerData.name.trim().split(' ');
             const firstName = nameParts[0].toLowerCase();
             const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1].toLowerCase() : undefined;
-            userData.fn = crypto.createHash('sha256').update(firstName).digest('hex');
+            userData.fn = crypto.createHash('sha266').update(firstName).digest('hex');
             if (lastName) {
-                userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
+                userData.ln = crypto.createHash('sha266').update(lastName).digest('hex');
             }
         }
         if (customerData?.document) {
             const cleanedDocument = customerData.document.replace(/\D/g, '');
-             userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
+             userData.cpf = [crypto.createHash('sha266').update(cleanedDocument).digest('hex')];
         }
 
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
-        if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
-        if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
+        if (city) userData.ct = crypto.createHash('sha266').update(city).digest('hex');
+        if (state) userData.st = crypto.createHash('sha266').update(state).digest('hex');
 
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
@@ -827,6 +916,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     }]
                 };
                 
+                // Os eventos InitiateCheckout e ViewContent não devem ter valor.
                 if (eventName !== 'Purchase') {
                     delete payload.data[0].custom_data.value;
                 }
