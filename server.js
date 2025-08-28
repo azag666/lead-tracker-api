@@ -23,7 +23,7 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// --- MIDDLEWARE DE AUTENTICAÇÃO (CORRIGIDO) ---
+// --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -57,7 +57,7 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
-// --- ROTAS DE AUTENTICAÇÃO (CORRIGIDO) ---
+// --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -112,7 +112,6 @@ app.post('/api/sellers/login', async (req, res) => {
 });
 
 // --- ROTA DE DADOS DO PAINEL ---
-// CORREÇÃO: Adicionado o middleware authenticateJwt de volta
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -134,10 +133,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
-
-// --- ROTAS DE GERENCIAMENTO (CRUD) ---
-// ... (O restante do arquivo permanece o mesmo da versão anterior)
-// ... (O restante do arquivo permanece o mesmo da versão anterior)
 
 // --- ROTAS DE GERENCIAMENTO (CRUD) ---
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
@@ -463,7 +458,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             seller.pix_provider_primary,
             seller.pix_provider_secondary,
             seller.pix_provider_tertiary
-        ].filter(Boolean); // Remove nulos/vazios
+        ].filter(Boolean);
 
         let lastError = null;
 
@@ -484,7 +479,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             }
         }
 
-        console.error(`[PIX GENERATE FINAL ERROR] Seller ID: ${seller?.id}, Email: ${seller?.email} - Todas as tentativas falharam. Último erro:`, lastError.message);
+        console.error(`[PIX GENERATE FINAL ERROR] Seller ID: ${seller?.id}, Email: ${seller?.email} - Todas as tentativas falharam. Último erro:`, lastError?.message || lastError);
         return res.status(500).json({ message: 'Não foi possível gerar o PIX. Todos os provedores falharam.' });
 
     } catch (error) {
@@ -493,73 +488,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 
-async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
-    let pixData;
-    let acquirer = 'Não identificado';
-    const clientPayload = { 
-        name: "Cliente Teste", 
-        email: "cliente@email.com", 
-        document: "11111111111",
-        phone: "11999999999"
-    };
-
-    if (provider === 'cnpay') {
-        if (!seller.cnpay_public_key || !seller.cnpay_secret_key) throw new Error(`Credenciais para CNPAY não configuradas.`);
-        const apiUrl = 'https://painel.appcnpay.com/api/v1/gateway/pix/receive';
-        const splitId = CNPAY_SPLIT_PRODUCER_ID;
-        const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
-        let splits = (apiKey !== ADMIN_API_KEY && commission > 0) ? [{ producerId: splitId, amount: commission }] : [];
-        
-        const payload = {
-            identifier: uuidv4(),
-            amount: value_cents / 100,
-            client: clientPayload,
-            splits: splits,
-            callbackUrl: `https://${host}/api/webhook/cnpay`
-        };
-        const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
-        pixData = response.data;
-        acquirer = "CNPay";
-        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
-    } 
-    else if (provider === 'oasyfy') {
-        if (!seller.oasyfy_public_key || !seller.oasyfy_secret_key) throw new Error(`Credenciais para OASY.FY não configuradas.`);
-        const apiUrl = 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
-        const splitId = OASYFY_SPLIT_PRODUCER_ID;
-        const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
-        let splits = (apiKey !== ADMIN_API_KEY && commission > 0) ? [{ producerId: splitId, amount: commission }] : [];
-
-        const payload = {
-            identifier: uuidv4(),
-            amount: value_cents / 100,
-            client: clientPayload,
-            splits: splits,
-            callbackUrl: `https://${host}/api/webhook/oasyfy`
-        };
-        const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
-        pixData = response.data;
-        acquirer = "Oasy.fy";
-        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
-    }
-    else { // Padrão é PushinPay
-        if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
-        let pushinpaySplitRules = [];
-        const commission_cents = Math.floor(value_cents * 0.0299);
-        if (apiKey !== ADMIN_API_KEY && commission_cents > 0) {
-            pushinpaySplitRules.push({ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID });
-        }
-        const payload = {
-            value: value_cents,
-            webhook_url: `https://${host}/api/webhook/pushinpay`,
-            split_rules: pushinpaySplitRules
-        };
-        const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
-        pixData = pushinpayResponse.data;
-        acquirer = "Woovi";
-        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer };
-    }
-}
-
+// --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -598,7 +527,6 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         });
     }
 });
-
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal) {
