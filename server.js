@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 14:15
+// Forçando novo deploy em 29/08/2025 - 14:30
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -446,8 +446,11 @@ app.get('/api/bots/:id/users', authenticateJwt, async (req, res) => {
 
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    const { name, bot_id, white_page_url, pixel_ids } = req.body;
-    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+    const { name, bot_id, white_page_url, pixel_ids, send_type, initial_message, button_text, button_url, pix_value_cents, pix_button_text, success_message, payment_check_message, payment_check_button_text } = req.body;
+    
+    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) {
+        return res.status(400).json({ message: 'Campos básicos são obrigatórios.' });
+    }
     
     try {
         const numeric_bot_id = parseInt(bot_id, 10);
@@ -461,7 +464,13 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
 
         await sql`BEGIN`;
         try {
-            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
+            const [newPressel] = await sql`
+                INSERT INTO pressels (
+                    seller_id, name, bot_id, bot_name, white_page_url, send_type, initial_message, button_text, button_url, pix_value_cents, pix_button_text, success_message, payment_check_message, payment_check_button_text
+                ) VALUES (
+                    ${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${send_type}, ${initial_message || null}, ${button_text || null}, ${button_url || null}, ${pix_value_cents || null}, ${pix_button_text || null}, ${success_message || null}, ${payment_check_message || null}, ${payment_check_button_text || null}
+                ) RETURNING *;
+            `;
             
             for (const pixelId of numeric_pixel_ids) {
                 await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
@@ -939,7 +948,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { message } = req.body;
 
     if (!message || !message.chat) {
-        // Ignora atualizações sem mensagens ou chats, como edições de mensagens.
         return res.status(200).send('No message found');
     }
 
@@ -952,10 +960,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 
     try {
         const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) return res.status(404).send('Bot not found');
+        if (!bot) {
+             console.warn(`Webhook recebido para botId não encontrado: ${botId}`);
+             return res.status(404).send('Bot not found');
+        }
 
-        // Salva ou atualiza os dados do usuário no banco de dados.
-        // A cláusula ON CONFLICT evita duplicar registros.
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
             VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
@@ -975,7 +984,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     }
 });
 
-// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM ---
+// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE) ---
 app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { chatId, message, botId } = req.body;
@@ -985,7 +994,6 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     }
     
     try {
-        // Obtenha o token do bot e verifique se ele pertence ao usuário logado
         const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não pertence a você.' });
@@ -997,7 +1005,7 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
         const payload = {
             chat_id: chatId,
             text: message,
-            parse_mode: 'HTML' // Permite formatação básica como negrito e itálico
+            parse_mode: 'HTML'
         };
 
         const response = await axios.post(apiUrl, payload);
@@ -1008,10 +1016,128 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
             throw new Error(response.data.description || 'Falha ao enviar mensagem.');
         }
     } catch (error) {
+        if (error.response && error.response.status === 403) {
+            console.warn(`Falha ao enviar mensagem: O usuário (chat_id: ${chatId}) bloqueou o bot.`);
+            return res.status(200).json({ status: 'skipped', message: `Usuário bloqueou o bot, mensagem não enviada.` });
+        }
+        
         console.error("Erro ao enviar mensagem do Telegram:", error.response?.data || error.message);
         res.status(500).json({ message: 'Falha ao enviar mensagem.', details: error.response?.data?.description || error.message });
     }
 });
+
+// --- NOVO: ROTA PARA BUSCAR HISTÓRICO DE DISPAROS ---
+app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const botId = parseInt(id, 10);
+    
+    if (isNaN(botId)) {
+        return res.status(400).json({ message: 'ID do bot inválido.' });
+    }
+
+    try {
+        const history = await sql`
+            SELECT * FROM mass_sends 
+            WHERE bot_id = ${botId} AND seller_id = ${req.user.id} 
+            ORDER BY sent_at DESC;
+        `;
+        res.status(200).json(history);
+    } catch (error) {
+        console.error("Erro ao buscar histórico de disparos:", error);
+        res.status(500).json({ message: 'Erro ao buscar histórico.' });
+    }
+});
+
+// --- NOVO: ROTA PARA REALIZAR O DISPARO EM MASSA (ATUALIZADA) ---
+app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const botId = parseInt(id, 10);
+    const sellerId = req.user.id;
+    const { message, buttonText, buttonUrl, pixCode } = req.body;
+
+    if (!message && !pixCode) {
+        return res.status(400).json({ message: 'A mensagem ou o código PIX são obrigatórios.' });
+    }
+    if (buttonText && !buttonUrl) {
+        return res.status(400).json({ message: 'A URL do botão é obrigatória quando o texto do botão é fornecido.' });
+    }
+
+    try {
+        const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado.' });
+        }
+        const users = await sql`SELECT chat_id FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${sellerId}`;
+        if (users.length === 0) {
+            return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
+        }
+
+        const [log] = await sql`
+            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url, pix_code)
+            VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null}, ${pixCode || null})
+            RETURNING id;
+        `;
+        const logId = log.id;
+        
+        res.status(202).json({ message: `Disparo iniciado para ${users.length} usuários.`, logId: logId });
+        
+        (async () => {
+            let successCount = 0;
+            let failureCount = 0;
+            const botToken = bot.bot_token;
+            const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+            for (const user of users) {
+                let finalMessage = message;
+                if (pixCode) {
+                    finalMessage += `\n\n<code>${pixCode}</code>`;
+                }
+
+                const payload = {
+                    chat_id: user.chat_id,
+                    text: finalMessage,
+                    parse_mode: 'HTML'
+                };
+
+                if (buttonText && buttonUrl) {
+                    payload.reply_markup = {
+                        inline_keyboard: [
+                            [{ text: buttonText, url: buttonUrl }]
+                        ]
+                    };
+                }
+
+                try {
+                    await axios.post(apiUrl, payload, { timeout: 5000 });
+                    successCount++;
+                } catch (error) {
+                    failureCount++;
+                    if (error.response && error.response.status === 403) {
+                        console.warn(`Usuário ${user.chat_id} bloqueou o bot.`);
+                    } else {
+                        console.error(`Falha ao enviar para ${user.chat_id}:`, error.message);
+                    }
+                }
+                await new Promise(resolve => setTimeout(resolve, 200)); 
+            }
+
+            await sql`
+                UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount}
+                WHERE id = ${logId};
+            `;
+            console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
+        })();
+
+    } catch (error) {
+        console.error("Erro no disparo em massa:", error);
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
+        }
+    }
+});
+
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
