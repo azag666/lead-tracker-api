@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 14:15
+// Forçando novo deploy em 29/08/2025 - 15:45 (com fluxo de bot interativo)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -932,12 +932,117 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE WEBHOOK DO TELEGRAM ---
+// --- *** ATUALIZAÇÃO PRINCIPAL: WEBHOOK DO TELEGRAM INTERATIVO *** ---
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const sql = getDbConnection();
     const { botId } = req.params;
-    const { message } = req.body;
 
+    // Cenário 1: Usuário clicou em um botão interativo (callback_query)
+    if (req.body.callback_query) {
+        const { callback_query } = req.body;
+        const chatId = callback_query.message.chat.id;
+        const [action, ...params] = callback_query.data.split('|');
+
+        try {
+            const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
+            if (!bot) {
+                console.warn(`Callback recebido para botId não encontrado: ${botId}`);
+                return res.status(404).send('Bot not found');
+            }
+            const botToken = bot.bot_token;
+            const apiUrl = `https://api.telegram.org/bot${botToken}`;
+
+            switch(action) {
+                case 'generate_pix':
+                    const [value, confirmationText, checkButtonText] = params;
+                    const value_cents = parseInt(value, 10);
+
+                    // Cria um registro de clique "sintético" para associar a transação
+                    const [click] = await sql`INSERT INTO clicks (seller_id, pressel_id) SELECT ${bot.seller_id}, p.id FROM pressels p WHERE p.bot_id = ${botId} LIMIT 1 RETURNING id`;
+                    if (!click) { throw new Error('Nenhuma pressel encontrada para associar o clique.'); }
+                    
+                    const click_id_internal = click.id;
+                    const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
+                    await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
+                    
+                    // Busca os dados do vendedor para gerar o PIX
+                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
+                    
+                    // Usa a função existente para gerar o PIX
+                    const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
+                    let pixResult;
+                    for (const provider of providerOrder) {
+                        try {
+                            pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                            if (pixResult) break;
+                        } catch (e) {
+                            console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`);
+                        }
+                    }
+                    if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
+
+                    // Salva a transação no banco
+                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${providerOrder[0]}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+
+                    // Envia a mensagem com o PIX no formato solicitado
+                    const pixMessagePayload = {
+                        chat_id: chatId,
+                        text: `<code>${pixResult.qr_code_text}</code>`,
+                        parse_mode: 'HTML',
+                        reply_markup: {
+                            inline_keyboard: [[{
+                                text: "📋 Copiar Código PIX",
+                                callback_data: `copy_pix`
+                            }]]
+                        }
+                    };
+                    await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
+                    
+                    // Envia a mensagem de confirmação com o botão de checagem
+                    const confirmationPayload = {
+                        chat_id: chatId,
+                        text: confirmationText,
+                        parse_mode: 'HTML',
+                        reply_markup: {
+                            inline_keyboard: [[{
+                                text: checkButtonText,
+                                callback_data: `check_payment|${pixResult.transaction_id}`
+                            }]]
+                        }
+                    };
+                    await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
+                    break;
+
+                case 'check_payment':
+                    const [txId] = params;
+                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId}`;
+                    
+                    let feedbackMessage = "❌ Pagamento ainda não identificado. Tente novamente em alguns instantes.";
+                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) {
+                        feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado.";
+                    }
+                    
+                    await axios.post(`${apiUrl}/sendMessage`, { chat_id: chatId, text: feedbackMessage });
+                    break;
+                
+                case 'copy_pix':
+                     // Responde ao clique para dar feedback de cópia
+                     await axios.post(`${apiUrl}/answerCallbackQuery`, {
+                         callback_query_id: callback_query.id,
+                         text: "Código PIX copiado!",
+                         show_alert: false
+                     });
+                    break;
+            }
+        } catch (error) {
+            console.error('Erro no processamento do callback do webhook:', error.message);
+        }
+        
+        return res.sendStatus(200);
+    }
+
+    // Cenário 2: É uma mensagem de texto normal (lógica original)
+    const { message } = req.body;
     if (!message || !message.chat) {
         return res.status(200).send('No message found');
     }
@@ -952,7 +1057,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     try {
         const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
         if (!bot) {
-             console.warn(`Webhook recebido para botId não encontrado: ${botId}`);
+             console.warn(`Webhook (texto) recebido para botId não encontrado: ${botId}`);
              return res.status(404).send('Bot not found');
         }
 
@@ -970,54 +1075,13 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         console.log(`Dados do chat ID ${chatId} salvos/atualizados para o bot ${botId}.`);
         res.sendStatus(200);
     } catch (error) {
-        console.error('Erro ao processar webhook do Telegram:', error);
+        console.error('Erro ao processar webhook do Telegram (texto):', error);
         res.sendStatus(500);
     }
 });
 
-// ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE)
-app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { chatId, message, botId } = req.body;
 
-    if (!chatId || !message || !botId) {
-        return res.status(400).json({ message: 'Chat ID, mensagem e ID do bot são obrigatórios.' });
-    }
-    
-    try {
-        const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
-        if (!bot) {
-            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a você.' });
-        }
-
-        const botToken = bot.bot_token;
-        const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
-        
-        const payload = {
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'HTML'
-        };
-
-        const response = await axios.post(apiUrl, payload);
-        
-        if (response.data.ok) {
-            res.status(200).json({ message: 'Mensagem enviada com sucesso!', telegramResponse: response.data });
-        } else {
-            throw new Error(response.data.description || 'Falha ao enviar mensagem.');
-        }
-    } catch (error) {
-        if (error.response && error.response.status === 403) {
-            console.warn(`Falha ao enviar mensagem: O usuário (chat_id: ${chatId}) bloqueou o bot.`);
-            return res.status(200).json({ status: 'skipped', message: `Usuário bloqueou o bot, mensagem não enviada.` });
-        }
-        
-        console.error("Erro ao enviar mensagem do Telegram:", error.response?.data || error.message);
-        res.status(500).json({ message: 'Falha ao enviar mensagem.', details: error.response?.data?.description || error.message });
-    }
-});
-
-// --- NOVO: ROTA PARA BUSCAR HISTÓRICO DE DISPAROS ---
+// --- ROTA PARA BUSCAR HISTÓRICO DE DISPAROS ---
 app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
@@ -1040,34 +1104,31 @@ app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- NOVO: ROTA PARA REALIZAR O DISPARO EM MASSA (ATUALIZADA) ---
+// --- *** ATUALIZAÇÃO PRINCIPAL: ROTA DE DISPARO EM MASSA *** ---
 app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
     const botId = parseInt(id, 10);
     const sellerId = req.user.id;
-    const { message, buttonText, buttonUrl, pixCode } = req.body;
+    const { 
+        flowType, initialText, ctaButtonText, pixValue, 
+        confirmationText, checkButtonText, externalLink 
+    } = req.body;
 
-    if (!message && !pixCode) {
-        return res.status(400).json({ message: 'A mensagem ou o código PIX são obrigatórios.' });
-    }
-    if (buttonText && !buttonUrl) {
-        return res.status(400).json({ message: 'A URL do botão é obrigatória quando o texto do botão é fornecido.' });
+    if (!initialText || !ctaButtonText) {
+        return res.status(400).json({ message: 'Mensagem inicial e texto do botão são obrigatórios.' });
     }
 
     try {
         const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
-        if (!bot) {
-            return res.status(404).json({ message: 'Bot não encontrado.' });
-        }
+        if (!bot) return res.status(404).json({ message: 'Bot não encontrado.' });
+        
         const users = await sql`SELECT chat_id FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${sellerId}`;
-        if (users.length === 0) {
-            return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
-        }
+        if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
 
         const [log] = await sql`
-            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url, pix_code)
-            VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null}, ${pixCode || null})
+            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
+            VALUES (${sellerId}, ${botId}, ${initialText}, ${ctaButtonText}, ${externalLink || null})
             RETURNING id;
         `;
         const logId = log.id;
@@ -1081,22 +1142,26 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
             const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
 
             for (const user of users) {
-                let finalMessage = message;
-                if (pixCode) {
-                    finalMessage += `\n\n<code>${pixCode}</code>`;
-                }
-
-                const payload = {
-                    chat_id: user.chat_id,
-                    text: finalMessage,
-                    parse_mode: 'HTML'
-                };
-
-                if (buttonText && buttonUrl) {
-                    payload.reply_markup = {
-                        inline_keyboard: [
-                            [{ text: buttonText, url: buttonUrl }]
-                        ]
+                let payload;
+                if (flowType === 'pix_flow') {
+                    const valueInCents = Math.round(parseFloat(pixValue) * 100);
+                    const callback_data = `generate_pix|${valueInCents}|${confirmationText}|${checkButtonText}`;
+                    payload = {
+                        chat_id: user.chat_id,
+                        text: initialText,
+                        parse_mode: 'HTML',
+                        reply_markup: {
+                            inline_keyboard: [[{ text: ctaButtonText, callback_data }]]
+                        }
+                    };
+                } else { // external_link
+                    payload = {
+                        chat_id: user.chat_id,
+                        text: initialText,
+                        parse_mode: 'HTML',
+                        reply_markup: {
+                            inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]]
+                        }
                     };
                 }
 
