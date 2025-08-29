@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 16:15 (com correção de bugs do fluxo interativo)
+// Forçando novo deploy em 29/08/2025 - 17:00 (com Central de Disparos e Multi-bot)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -419,26 +419,25 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     }
 });
 
-app.get('/api/bots/:id/users', authenticateJwt, async (req, res) => {
+app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    const { id } = req.params;
-    const botId = parseInt(id, 10);
+    const { botIds } = req.query; // Recebe uma string de IDs: "1,2,3"
 
-    if (isNaN(botId)) {
-        return res.status(400).json({ message: 'ID do bot inválido.' });
+    if (!botIds) {
+        return res.status(400).json({ message: 'IDs dos bots são obrigatórios.' });
     }
+    const botIdArray = botIds.split(',').map(id => parseInt(id.trim(), 10));
 
     try {
-        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
-        if (!bot) {
-            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
-        }
-
-        const users = await sql`SELECT chat_id, first_name, last_name, username FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${req.user.id} ORDER BY created_at DESC;`;
-
-        res.status(200).json(users);
+        // Pega todos os usuários únicos dos bots selecionados
+        const users = await sql`
+            SELECT DISTINCT ON (chat_id) chat_id, first_name, last_name, username 
+            FROM telegram_chats 
+            WHERE bot_id = ANY(${botIdArray}) AND seller_id = ${req.user.id};
+        `;
+        res.status(200).json({ total_users: users.length });
     } catch (error) {
-        console.error("Erro ao buscar usuários do bot:", error);
+        console.error("Erro ao buscar contagem de usuários do bot:", error);
         res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
     }
 });
@@ -932,8 +931,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-
-// --- *** WEBHOOK DO TELEGRAM CORRIGIDO E ROBUSTO *** ---
+// --- ROTA DE WEBHOOK DO TELEGRAM ---
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const sql = getDbConnection();
     const { botId } = req.params;
@@ -1062,81 +1060,123 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 });
 
 
-// --- ROTA PARA BUSCAR HISTÓRICO DE DISPAROS ---
-app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
+// --- *** ROTAS DA NOVA CENTRAL DE DISPAROS *** ---
+app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    const { id } = req.params;
-    const botId = parseInt(id, 10);
-    
-    if (isNaN(botId)) return res.status(400).json({ message: 'ID do bot inválido.' });
-
     try {
-        const history = await sql`SELECT * FROM mass_sends WHERE bot_id = ${botId} AND seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
-        res.status(200).json(history);
+        const dispatches = await sql`
+            SELECT * FROM mass_sends 
+            WHERE seller_id = ${req.user.id} 
+            ORDER BY sent_at DESC;
+        `;
+        res.status(200).json(dispatches);
     } catch (error) {
         console.error("Erro ao buscar histórico de disparos:", error);
         res.status(500).json({ message: 'Erro ao buscar histórico.' });
     }
 });
 
-// --- *** ROTA DE DISPARO CORRIGIDA *** ---
-app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
+app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
-    const botId = parseInt(id, 10);
-    const sellerId = req.user.id;
-    const { flowType, initialText, ctaButtonText, pixValue, externalLink } = req.body;
+    try {
+        const details = await sql`
+            SELECT d.*, u.first_name, u.username
+            FROM mass_send_details d
+            LEFT JOIN telegram_chats u ON d.chat_id = u.chat_id
+            WHERE d.mass_send_id = ${id}
+            ORDER BY d.sent_at;
+        `;
+        res.status(200).json(details);
+    } catch (error) {
+        console.error("Erro ao buscar detalhes do disparo:", error);
+        res.status(500).json({ message: 'Erro ao buscar detalhes.' });
+    }
+});
 
-    if (!initialText || !ctaButtonText) {
-        return res.status(400).json({ message: 'Mensagem inicial e texto do botão são obrigatórios.' });
+// --- ROTA DE DISPARO EM MASSA (MULTI-BOT) ---
+app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const sellerId = req.user.id;
+    const { 
+        botIds, flowType, initialText, ctaButtonText, 
+        pixValue, externalLink, imageUrl 
+    } = req.body;
+
+    if (!botIds || botIds.length === 0 || !initialText || !ctaButtonText) {
+        return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     }
 
     try {
-        const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
-        if (!bot) return res.status(404).json({ message: 'Bot não encontrado.' });
+        const bots = await sql`SELECT id, bot_token FROM telegram_bots WHERE id = ANY(${botIds}) AND seller_id = ${sellerId}`;
+        if (bots.length === 0) return res.status(404).json({ message: 'Nenhum bot válido selecionado.' });
         
-        const users = await sql`SELECT chat_id FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${sellerId}`;
-        if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
+        const users = await sql`
+            SELECT DISTINCT ON (chat_id) chat_id, bot_id 
+            FROM telegram_chats 
+            WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
+        if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para os bots selecionados.' });
 
         const [log] = await sql`
-            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
-            VALUES (${sellerId}, ${botId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}) RETURNING id;`;
+            INSERT INTO mass_sends (seller_id, message_content, button_text, button_url, image_url)
+            VALUES (${sellerId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}, ${imageUrl || null}) RETURNING id;`;
         const logId = log.id;
         
-        res.status(202).json({ message: `Disparo iniciado para ${users.length} usuários.`, logId: logId });
+        res.status(202).json({ message: `Disparo agendado para ${users.length} usuários.`, logId });
         
         (async () => {
             let successCount = 0;
             let failureCount = 0;
-            const botToken = bot.bot_token;
-            const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+            const botTokenMap = new Map(bots.map(b => [b.id, b.bot_token]));
 
             for (const user of users) {
+                const botToken = botTokenMap.get(user.bot_id);
+                if (!botToken) continue;
+
                 let payload;
+                const endpoint = imageUrl ? 'sendPhoto' : 'sendMessage';
+                const apiUrl = `https://api.telegram.org/bot${botToken}/${endpoint}`;
+
                 if (flowType === 'pix_flow') {
                     const valueInCents = Math.round(parseFloat(pixValue) * 100);
-                    // Callback SIMPLIFICADO para evitar erros de tamanho
                     const callback_data = `generate_pix|${valueInCents}`;
                     payload = {
-                        chat_id: user.chat_id, text: initialText, parse_mode: 'HTML',
+                        chat_id: user.chat_id,
+                        caption: initialText, // 'caption' para imagem, 'text' para texto
+                        text: initialText,
+                        photo: imageUrl,
+                        parse_mode: 'HTML',
                         reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] }
                     };
                 } else { // external_link
                     payload = {
-                        chat_id: user.chat_id, text: initialText, parse_mode: 'HTML',
+                        chat_id: user.chat_id,
+                        caption: initialText,
+                        text: initialText,
+                        photo: imageUrl,
+                        parse_mode: 'HTML',
                         reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] }
                     };
                 }
+                
+                if (!imageUrl) {
+                    delete payload.photo;
+                    delete payload.caption;
+                } else {
+                    delete payload.text;
+                }
 
                 try {
-                    await axios.post(apiUrl, payload, { timeout: 10000 }); // Timeout aumentado para 10s
+                    await axios.post(apiUrl, payload, { timeout: 10000 });
                     successCount++;
+                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status) VALUES (${logId}, ${user.chat_id}, 'success')`;
                 } catch (error) {
                     failureCount++;
-                    const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+                    const errorMessage = error.response?.data?.description || error.message;
                     console.error(`Falha ao enviar para ${user.chat_id}: ${errorMessage}`);
+                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status, details) VALUES (${logId}, ${user.chat_id}, 'failure', ${errorMessage})`;
                 }
-                await new Promise(resolve => setTimeout(resolve, 300)); // Delay um pouco maior
+                await new Promise(resolve => setTimeout(resolve, 300));
             }
 
             await sql`
