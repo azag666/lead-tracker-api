@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 15:45 (com fluxo de bot interativo)
+// Forçando novo deploy em 29/08/2025 - 16:15 (com correção de bugs do fluxo interativo)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -97,7 +97,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
         pixData = response.data;
         acquirer = isCnpay ? "CNPay" : "Oasy.fy";
-        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
+        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
 
     } else { // Padrão é PushinPay
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
@@ -114,7 +114,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
         pixData = pushinpayResponse.data;
         acquirer = "Woovi";
-        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer };
+        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer, provider: 'pushinpay' };
     }
 }
 
@@ -765,7 +765,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             try {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
                 
-                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
+                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
                 if (click.pressel_id) {
                     await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
@@ -932,7 +932,8 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- *** ATUALIZAÇÃO PRINCIPAL: WEBHOOK DO TELEGRAM INTERATIVO *** ---
+
+// --- *** WEBHOOK DO TELEGRAM CORRIGIDO E ROBUSTO *** ---
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const sql = getDbConnection();
     const { botId } = req.params;
@@ -954,70 +955,53 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 
             switch(action) {
                 case 'generate_pix':
-                    const [value, confirmationText, checkButtonText] = params;
+                    const [value] = params;
                     const value_cents = parseInt(value, 10);
 
-                    // Cria um registro de clique "sintético" para associar a transação
-                    const [click] = await sql`INSERT INTO clicks (seller_id, pressel_id) SELECT ${bot.seller_id}, p.id FROM pressels p WHERE p.bot_id = ${botId} LIMIT 1 RETURNING id`;
-                    if (!click) { throw new Error('Nenhuma pressel encontrada para associar o clique.'); }
+                    const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
+                    if (!click) { throw new Error('Não foi possível criar um registro de clique.'); }
                     
                     const click_id_internal = click.id;
                     const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
                     await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
                     
-                    // Busca os dados do vendedor para gerar o PIX
                     const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
-                    
-                    // Usa a função existente para gerar o PIX
                     const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
+                    if (providerOrder.length === 0) providerOrder.push('pushinpay');
+
                     let pixResult;
                     for (const provider of providerOrder) {
                         try {
                             pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
                             if (pixResult) break;
-                        } catch (e) {
-                            console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`);
-                        }
+                        } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
                     }
                     if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
 
-                    // Salva a transação no banco
-                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${providerOrder[0]}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
 
-                    // Envia a mensagem com o PIX no formato solicitado
                     const pixMessagePayload = {
                         chat_id: chatId,
                         text: `<code>${pixResult.qr_code_text}</code>`,
                         parse_mode: 'HTML',
-                        reply_markup: {
-                            inline_keyboard: [[{
-                                text: "📋 Copiar Código PIX",
-                                callback_data: `copy_pix`
-                            }]]
-                        }
+                        reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] }
                     };
                     await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
                     
-                    // Envia a mensagem de confirmação com o botão de checagem
                     const confirmationPayload = {
                         chat_id: chatId,
-                        text: confirmationText,
+                        text: "Após efetuar o pagamento, clique no botão abaixo para verificar.",
                         parse_mode: 'HTML',
-                        reply_markup: {
-                            inline_keyboard: [[{
-                                text: checkButtonText,
-                                callback_data: `check_payment|${pixResult.transaction_id}`
-                            }]]
-                        }
+                        reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] }
                     };
                     await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
                     break;
 
                 case 'check_payment':
                     const [txId] = params;
-                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId}`;
+                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
                     
-                    let feedbackMessage = "❌ Pagamento ainda não identificado. Tente novamente em alguns instantes.";
+                    let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
                     if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) {
                         feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado.";
                     }
@@ -1026,16 +1010,15 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                     break;
                 
                 case 'copy_pix':
-                     // Responde ao clique para dar feedback de cópia
                      await axios.post(`${apiUrl}/answerCallbackQuery`, {
                          callback_query_id: callback_query.id,
-                         text: "Código PIX copiado!",
-                         show_alert: false
+                         text: "Copiado! Agora é só colar no app do seu banco.",
+                         show_alert: true
                      });
                     break;
             }
         } catch (error) {
-            console.error('Erro no processamento do callback do webhook:', error.message);
+            console.error('Erro no processamento do callback do webhook:', error.message, error.stack);
         }
         
         return res.sendStatus(200);
@@ -1071,8 +1054,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                 username = EXCLUDED.username,
                 click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
         `;
-
-        console.log(`Dados do chat ID ${chatId} salvos/atualizados para o bot ${botId}.`);
         res.sendStatus(200);
     } catch (error) {
         console.error('Erro ao processar webhook do Telegram (texto):', error);
@@ -1087,16 +1068,10 @@ app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const botId = parseInt(id, 10);
     
-    if (isNaN(botId)) {
-        return res.status(400).json({ message: 'ID do bot inválido.' });
-    }
+    if (isNaN(botId)) return res.status(400).json({ message: 'ID do bot inválido.' });
 
     try {
-        const history = await sql`
-            SELECT * FROM mass_sends 
-            WHERE bot_id = ${botId} AND seller_id = ${req.user.id} 
-            ORDER BY sent_at DESC;
-        `;
+        const history = await sql`SELECT * FROM mass_sends WHERE bot_id = ${botId} AND seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
         res.status(200).json(history);
     } catch (error) {
         console.error("Erro ao buscar histórico de disparos:", error);
@@ -1104,16 +1079,13 @@ app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- *** ATUALIZAÇÃO PRINCIPAL: ROTA DE DISPARO EM MASSA *** ---
+// --- *** ROTA DE DISPARO CORRIGIDA *** ---
 app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
     const botId = parseInt(id, 10);
     const sellerId = req.user.id;
-    const { 
-        flowType, initialText, ctaButtonText, pixValue, 
-        confirmationText, checkButtonText, externalLink 
-    } = req.body;
+    const { flowType, initialText, ctaButtonText, pixValue, externalLink } = req.body;
 
     if (!initialText || !ctaButtonText) {
         return res.status(400).json({ message: 'Mensagem inicial e texto do botão são obrigatórios.' });
@@ -1128,9 +1100,7 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
 
         const [log] = await sql`
             INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
-            VALUES (${sellerId}, ${botId}, ${initialText}, ${ctaButtonText}, ${externalLink || null})
-            RETURNING id;
-        `;
+            VALUES (${sellerId}, ${botId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}) RETURNING id;`;
         const logId = log.id;
         
         res.status(202).json({ message: `Disparo iniciado para ${users.length} usuários.`, logId: logId });
@@ -1145,52 +1115,38 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
                 let payload;
                 if (flowType === 'pix_flow') {
                     const valueInCents = Math.round(parseFloat(pixValue) * 100);
-                    const callback_data = `generate_pix|${valueInCents}|${confirmationText}|${checkButtonText}`;
+                    // Callback SIMPLIFICADO para evitar erros de tamanho
+                    const callback_data = `generate_pix|${valueInCents}`;
                     payload = {
-                        chat_id: user.chat_id,
-                        text: initialText,
-                        parse_mode: 'HTML',
-                        reply_markup: {
-                            inline_keyboard: [[{ text: ctaButtonText, callback_data }]]
-                        }
+                        chat_id: user.chat_id, text: initialText, parse_mode: 'HTML',
+                        reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] }
                     };
                 } else { // external_link
                     payload = {
-                        chat_id: user.chat_id,
-                        text: initialText,
-                        parse_mode: 'HTML',
-                        reply_markup: {
-                            inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]]
-                        }
+                        chat_id: user.chat_id, text: initialText, parse_mode: 'HTML',
+                        reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] }
                     };
                 }
 
                 try {
-                    await axios.post(apiUrl, payload, { timeout: 5000 });
+                    await axios.post(apiUrl, payload, { timeout: 10000 }); // Timeout aumentado para 10s
                     successCount++;
                 } catch (error) {
                     failureCount++;
-                    if (error.response && error.response.status === 403) {
-                        console.warn(`Usuário ${user.chat_id} bloqueou o bot.`);
-                    } else {
-                        console.error(`Falha ao enviar para ${user.chat_id}:`, error.message);
-                    }
+                    const errorMessage = error.response ? JSON.stringify(error.response.data) : error.message;
+                    console.error(`Falha ao enviar para ${user.chat_id}: ${errorMessage}`);
                 }
-                await new Promise(resolve => setTimeout(resolve, 200)); 
+                await new Promise(resolve => setTimeout(resolve, 300)); // Delay um pouco maior
             }
 
             await sql`
-                UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount}
-                WHERE id = ${logId};
-            `;
+                UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount} WHERE id = ${logId};`;
             console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
         })();
 
     } catch (error) {
         console.error("Erro no disparo em massa:", error);
-        if (!res.headersSent) {
-            res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
-        }
+        if (!res.headersSent) res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
     }
 });
 
@@ -1427,6 +1383,7 @@ async function checkPendingTransactions() {
 setInterval(checkPendingTransactions, 120000);
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
+// ... (Nenhuma alteração aqui, código do admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
