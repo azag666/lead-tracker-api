@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 17:00 (com Central de Disparos e Multi-bot)
+// Forçando novo deploy em 29/08/2025 - 17:10 (com filtro para não salvar grupos/canais)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -936,7 +936,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const sql = getDbConnection();
     const { botId } = req.params;
 
-    // Cenário 1: Usuário clicou em um botão interativo (callback_query)
     if (req.body.callback_query) {
         const { callback_query } = req.body;
         const chatId = callback_query.message.chat.id;
@@ -944,10 +943,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 
         try {
             const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-            if (!bot) {
-                console.warn(`Callback recebido para botId não encontrado: ${botId}`);
-                return res.status(404).send('Bot not found');
-            }
+            if (!bot) { return res.status(404).send('Bot not found'); }
             const botToken = bot.bot_token;
             const apiUrl = `https://api.telegram.org/bot${botToken}`;
 
@@ -955,18 +951,14 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                 case 'generate_pix':
                     const [value] = params;
                     const value_cents = parseInt(value, 10);
-
                     const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
                     if (!click) { throw new Error('Não foi possível criar um registro de clique.'); }
-                    
                     const click_id_internal = click.id;
                     const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
                     await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
-                    
                     const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
                     const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
                     if (providerOrder.length === 0) providerOrder.push('pushinpay');
-
                     let pixResult;
                     for (const provider of providerOrder) {
                         try {
@@ -975,60 +967,37 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                         } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
                     }
                     if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
-
                     await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
-
-                    const pixMessagePayload = {
-                        chat_id: chatId,
-                        text: `<code>${pixResult.qr_code_text}</code>`,
-                        parse_mode: 'HTML',
-                        reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] }
-                    };
+                    const pixMessagePayload = { chat_id: chatId, text: `<code>${pixResult.qr_code_text}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] } };
                     await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
-                    
-                    const confirmationPayload = {
-                        chat_id: chatId,
-                        text: "Após efetuar o pagamento, clique no botão abaixo para verificar.",
-                        parse_mode: 'HTML',
-                        reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] }
-                    };
+                    const confirmationPayload = { chat_id: chatId, text: "Após efetuar o pagamento, clique no botão abaixo para verificar.", parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] } };
                     await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
                     break;
-
                 case 'check_payment':
                     const [txId] = params;
                     const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
-                    
                     let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
-                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) {
-                        feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado.";
-                    }
-                    
+                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) { feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado."; }
                     await axios.post(`${apiUrl}/sendMessage`, { chat_id: chatId, text: feedbackMessage });
                     break;
-                
                 case 'copy_pix':
-                     await axios.post(`${apiUrl}/answerCallbackQuery`, {
-                         callback_query_id: callback_query.id,
-                         text: "Copiado! Agora é só colar no app do seu banco.",
-                         show_alert: true
-                     });
+                     await axios.post(`${apiUrl}/answerCallbackQuery`, { callback_query_id: callback_query.id, text: "Copiado! Agora é só colar no app do seu banco.", show_alert: true });
                     break;
             }
-        } catch (error) {
-            console.error('Erro no processamento do callback do webhook:', error.message, error.stack);
-        }
-        
+        } catch (error) { console.error('Erro no processamento do callback do webhook:', error.message, error.stack); }
         return res.sendStatus(200);
     }
 
-    // Cenário 2: É uma mensagem de texto normal (lógica original)
     const { message } = req.body;
-    if (!message || !message.chat) {
-        return res.status(200).send('No message found');
-    }
-
+    if (!message || !message.chat) { return res.status(200).send('No message found'); }
     const chatId = message.chat.id;
+
+    // *** ALTERAÇÃO PARA IGNORAR GRUPOS ***
+    if (chatId < 0) {
+        console.log(`Mensagem do grupo/canal ${chatId} ignorada.`);
+        return res.sendStatus(200);
+    }
+    
     const userId = message.from.id;
     const firstName = message.from.first_name;
     const lastName = message.from.last_name || null;
@@ -1037,20 +1006,13 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 
     try {
         const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) {
-             console.warn(`Webhook (texto) recebido para botId não encontrado: ${botId}`);
-             return res.status(404).send('Bot not found');
-        }
-
+        if (!bot) { return res.status(404).send('Bot not found'); }
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
             VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
             ON CONFLICT (chat_id) DO UPDATE SET
-                user_id = EXCLUDED.user_id,
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                username = EXCLUDED.username,
-                click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+                user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+                username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
         `;
         res.sendStatus(200);
     } catch (error) {
@@ -1060,15 +1022,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 });
 
 
-// --- *** ROTAS DA NOVA CENTRAL DE DISPAROS *** ---
+// --- ROTAS DA CENTRAL DE DISPAROS ---
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
-        const dispatches = await sql`
-            SELECT * FROM mass_sends 
-            WHERE seller_id = ${req.user.id} 
-            ORDER BY sent_at DESC;
-        `;
+        const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
         res.status(200).json(dispatches);
     } catch (error) {
         console.error("Erro ao buscar histórico de disparos:", error);
@@ -1094,14 +1052,11 @@ app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE DISPARO EM MASSA (MULTI-BOT) ---
+// ROTA DE DISPARO EM MASSA (MULTI-BOT)
 app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
-    const { 
-        botIds, flowType, initialText, ctaButtonText, 
-        pixValue, externalLink, imageUrl 
-    } = req.body;
+    const { botIds, flowType, initialText, ctaButtonText, pixValue, externalLink, imageUrl } = req.body;
 
     if (!botIds || botIds.length === 0 || !initialText || !ctaButtonText) {
         return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
@@ -1111,15 +1066,10 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
         const bots = await sql`SELECT id, bot_token FROM telegram_bots WHERE id = ANY(${botIds}) AND seller_id = ${sellerId}`;
         if (bots.length === 0) return res.status(404).json({ message: 'Nenhum bot válido selecionado.' });
         
-        const users = await sql`
-            SELECT DISTINCT ON (chat_id) chat_id, bot_id 
-            FROM telegram_chats 
-            WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
+        const users = await sql`SELECT DISTINCT ON (chat_id) chat_id, bot_id FROM telegram_chats WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
         if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para os bots selecionados.' });
 
-        const [log] = await sql`
-            INSERT INTO mass_sends (seller_id, message_content, button_text, button_url, image_url)
-            VALUES (${sellerId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}, ${imageUrl || null}) RETURNING id;`;
+        const [log] = await sql`INSERT INTO mass_sends (seller_id, message_content, button_text, button_url, image_url) VALUES (${sellerId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}, ${imageUrl || null}) RETURNING id;`;
         const logId = log.id;
         
         res.status(202).json({ message: `Disparo agendado para ${users.length} usuários.`, logId });
@@ -1133,38 +1083,19 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
                 const botToken = botTokenMap.get(user.bot_id);
                 if (!botToken) continue;
 
-                let payload;
                 const endpoint = imageUrl ? 'sendPhoto' : 'sendMessage';
                 const apiUrl = `https://api.telegram.org/bot${botToken}/${endpoint}`;
+                let payload;
 
                 if (flowType === 'pix_flow') {
                     const valueInCents = Math.round(parseFloat(pixValue) * 100);
                     const callback_data = `generate_pix|${valueInCents}`;
-                    payload = {
-                        chat_id: user.chat_id,
-                        caption: initialText, // 'caption' para imagem, 'text' para texto
-                        text: initialText,
-                        photo: imageUrl,
-                        parse_mode: 'HTML',
-                        reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] }
-                    };
-                } else { // external_link
-                    payload = {
-                        chat_id: user.chat_id,
-                        caption: initialText,
-                        text: initialText,
-                        photo: imageUrl,
-                        parse_mode: 'HTML',
-                        reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] }
-                    };
+                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] } };
+                } else {
+                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] } };
                 }
                 
-                if (!imageUrl) {
-                    delete payload.photo;
-                    delete payload.caption;
-                } else {
-                    delete payload.text;
-                }
+                if (!imageUrl) { delete payload.photo; delete payload.caption; } else { delete payload.text; }
 
                 try {
                     await axios.post(apiUrl, payload, { timeout: 10000 });
@@ -1179,8 +1110,7 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
                 await new Promise(resolve => setTimeout(resolve, 300));
             }
 
-            await sql`
-                UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount} WHERE id = ${logId};`;
+            await sql`UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount} WHERE id = ${logId};`;
             console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
         })();
 
