@@ -190,7 +190,10 @@ app.post('/api/sellers/register', async (req, res) => {
         }
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
-        await sql`INSERT INTO sellers (name, email, password_hash, api_key) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey})`;
+        
+        // CORREÇÃO AQUI: Adicionado 'is_active' com valor TRUE no INSERT
+        await sql`INSERT INTO sellers (name, email, password_hash, api_key, phone_number, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, ${phoneNumber}, TRUE)`;
+        
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
     } catch (error) {
         console.error("Erro no registro:", error);
@@ -231,6 +234,7 @@ app.post('/api/sellers/login', async (req, res) => {
     }
 });
 
+// O restante do código permanece o mesmo...
 // --- ROTA DE DADOS DO PAINEL ---
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
