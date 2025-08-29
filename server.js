@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 17:10 (com filtro para não salvar grupos/canais)
+// Forçando novo deploy em 29/08/2025 - 20:10 (Cadastro simplificado e remoção do Twilio)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -8,7 +8,8 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-const twilio = require('twilio');
+// A dependência do Twilio não é mais necessária
+// const twilio = require('twilio'); 
 
 const app = express();
 app.use(cors());
@@ -25,8 +26,7 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// --- CONFIGURAÇÃO TWILIO ---
-const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+// --- CONFIGURAÇÃO TWILIO REMOVIDA ---
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -150,39 +150,19 @@ async function checkAndAwardAchievements(seller_id) {
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
-app.post('/api/sellers/send-verification', async (req, res) => {
-    const { phoneNumber } = req.body;
-    if (!phoneNumber) {
-        return res.status(400).json({ message: 'Número de telefone é obrigatório.' });
-    }
-    try {
-        await twilioClient.verify.v2.services(process.env.TWILIO_SERVICE_SID)
-            .verifications
-            .create({ to: phoneNumber, channel: 'sms' });
-        res.status(200).json({ message: 'Código de verificação enviado!' });
-    } catch (error) {
-        console.error("Erro ao enviar código:", error.message);
-        res.status(500).json({ message: 'Falha ao enviar o código de verificação. Verifique o número e tente novamente.' });
-    }
-});
 
+// *** ROTA /api/sellers/send-verification REMOVIDA ***
+
+// *** ROTA DE REGISTRO SIMPLIFICADA ***
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
-    const { name, email, password, phoneNumber, verificationCode } = req.body;
+    const { name, email, password } = req.body;
 
-    if (!name || !email || !password || password.length < 8 || !phoneNumber || !verificationCode) {
-        return res.status(400).json({ message: 'Dados inválidos. Todos os campos, incluindo o número de telefone e o código, são obrigatórios.' });
+    if (!name || !email || !password || password.length < 8) {
+        return res.status(400).json({ message: 'Dados inválidos. Nome, email e senha (mínimo 8 caracteres) são obrigatórios.' });
     }
     
     try {
-        const verification = await twilioClient.verify.v2.services(process.env.TWILIO_SERVICE_SID)
-            .verificationChecks
-            .create({ to: phoneNumber, code: verificationCode });
-            
-        if (!verification.valid) {
-            return res.status(400).json({ message: 'Código de verificação inválido.' });
-        }
-
         const normalizedEmail = email.trim().toLowerCase();
         const existingSeller = await sql`SELECT id FROM sellers WHERE LOWER(email) = ${normalizedEmail}`;
         if (existingSeller.length > 0) {
@@ -191,7 +171,8 @@ app.post('/api/sellers/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
         
-        await sql`INSERT INTO sellers (name, email, password_hash, api_key, phone_number, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, ${phoneNumber}, TRUE)`;
+        // Query de inserção atualizada para não incluir phone_number
+        await sql`INSERT INTO sellers (name, email, password_hash, api_key, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, TRUE)`;
         
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
     } catch (error) {
@@ -992,7 +973,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     if (!message || !message.chat) { return res.status(200).send('No message found'); }
     const chatId = message.chat.id;
 
-    // *** ALTERAÇÃO PARA IGNORAR GRUPOS ***
     if (chatId < 0) {
         console.log(`Mensagem do grupo/canal ${chatId} ignorada.`);
         return res.sendStatus(200);
@@ -1353,7 +1333,6 @@ async function checkPendingTransactions() {
 setInterval(checkPendingTransactions, 120000);
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
-// ... (Nenhuma alteração aqui, código do admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
