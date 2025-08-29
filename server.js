@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
+const twilio = require('twilio');
 
 const app = express();
 app.use(cors());
@@ -22,6 +23,9 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+
+// --- CONFIGURAÇÃO TWILIO ---
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -145,11 +149,40 @@ async function checkAndAwardAchievements(seller_id) {
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
+app.post('/api/sellers/send-verification', async (req, res) => {
+    const { phoneNumber } = req.body;
+    if (!phoneNumber) {
+        return res.status(400).json({ message: 'Número de telefone é obrigatório.' });
+    }
+    try {
+        await twilioClient.verify.v2.services(process.env.TWILIO_SERVICE_SID)
+            .verifications
+            .create({ to: phoneNumber, channel: 'sms' });
+        res.status(200).json({ message: 'Código de verificação enviado!' });
+    } catch (error) {
+        console.error("Erro ao enviar código:", error.message);
+        res.status(500).json({ message: 'Falha ao enviar o código de verificação. Verifique o número e tente novamente.' });
+    }
+});
+
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
-    const { name, email, password } = req.body;
-    if (!name || !email || !password || password.length < 8) return res.status(400).json({ message: 'Dados inválidos.' });
+    const { name, email, password, phoneNumber, verificationCode } = req.body;
+
+    if (!name || !email || !password || password.length < 8 || !phoneNumber || !verificationCode) {
+        return res.status(400).json({ message: 'Dados inválidos. Todos os campos, incluindo o número de telefone e o código, são obrigatórios.' });
+    }
+    
     try {
+        // Valide o código de verificação com a Twilio
+        const verification = await twilioClient.verify.v2.services(process.env.TWILIO_SERVICE_SID)
+            .verificationChecks
+            .create({ to: phoneNumber, code: verificationCode });
+            
+        if (!verification.valid) {
+            return res.status(400).json({ message: 'Código de verificação inválido.' });
+        }
+
         const normalizedEmail = email.trim().toLowerCase();
         const existingSeller = await sql`SELECT id FROM sellers WHERE LOWER(email) = ${normalizedEmail}`;
         if (existingSeller.length > 0) {
