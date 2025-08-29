@@ -361,7 +361,7 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
 
         res.status(201).json(newBot[0]);
     } catch (error) {
-        if (error.code === '23505') {
+        if (error.code === '23505') { 
             if (error.constraint_name === 'telegram_bots_bot_token_key') {
                 return res.status(409).json({ message: 'Este token de bot já está em uso.' });
             }
@@ -975,7 +975,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     }
 });
 
-// ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE)
+// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE) ---
 app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { chatId, message, botId } = req.body;
@@ -1040,7 +1040,7 @@ app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- NOVO: ROTA PARA REALIZAR O DISPARO EM MASSA ---
+// --- NOVO: ROTA PARA REALIZAR O DISPARO EM MASSA (ATUALIZADA) ---
 app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
@@ -1056,7 +1056,6 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
     }
 
     try {
-        // Busca o bot e os usuários
         const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado.' });
@@ -1066,7 +1065,6 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
             return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
         }
 
-        // Cria o registro do disparo no histórico
         const [log] = await sql`
             INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
             VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null})
@@ -1076,7 +1074,6 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
         
         res.status(202).json({ message: `Disparo iniciado para ${users.length} usuários.`, logId: logId });
         
-        // Inicia o processo de envio em segundo plano (sem travar a resposta)
         (async () => {
             let successCount = 0;
             let failureCount = 0;
@@ -1090,7 +1087,6 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
                     parse_mode: 'HTML'
                 };
 
-                // Adiciona o botão se os dados foram fornecidos
                 if (buttonText && buttonUrl) {
                     payload.reply_markup = {
                         inline_keyboard: [
@@ -1110,11 +1106,9 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
                         console.error(`Falha ao enviar para ${user.chat_id}:`, error.message);
                     }
                 }
-                // Pausa para evitar limites da API do Telegram
                 await new Promise(resolve => setTimeout(resolve, 200)); 
             }
 
-            // Atualiza o log com os resultados finais
             await sql`
                 UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount}
                 WHERE id = ${logId};
@@ -1124,7 +1118,6 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
 
     } catch (error) {
         console.error("Erro no disparo em massa:", error);
-        // Retorna um erro genérico se a falha for antes do loop
         if (!res.headersSent) {
             res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
         }
