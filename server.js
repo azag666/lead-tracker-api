@@ -322,6 +322,12 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
     try {
         const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
+
+        // NOVO: Registrar o webhook do Telegram.
+        const webhookUrl = `${req.protocol}://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
+        await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
+        console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
+
         res.status(201).json(newBot[0]);
     } catch (error) {
         if (error.code === '23505') { return res.status(409).json({ message: 'Um bot com este nome já existe.' }); }
@@ -862,6 +868,86 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
+// --- ROTA DE WEBHOOK DO TELEGRAM ---
+app.post('/api/webhook/telegram/:botId', async (req, res) => {
+    const sql = getDbConnection();
+    const { botId } = req.params;
+    const { message } = req.body;
+
+    if (!message || !message.chat) {
+        // Ignora atualizações sem mensagens ou chats, como edições de mensagens.
+        return res.status(200).send('No message found');
+    }
+
+    const chatId = message.chat.id;
+    const userId = message.from.id;
+    const firstName = message.from.first_name;
+    const lastName = message.from.last_name || null;
+    const username = message.from.username || null;
+    const clickId = message.text && message.text.startsWith('/start ') ? message.text.split(' ')[1] : null;
+
+    try {
+        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
+        if (!bot) return res.status(404).send('Bot not found');
+
+        // Salva ou atualiza os dados do usuário no banco de dados.
+        // A cláusula ON CONFLICT evita duplicar registros.
+        await sql`
+            INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
+            VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
+            ON CONFLICT (chat_id) DO UPDATE SET
+                user_id = EXCLUDED.user_id,
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                username = EXCLUDED.username,
+                click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+        `;
+
+        console.log(`Dados do chat ID ${chatId} salvos/atualizados para o bot ${botId}.`);
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('Erro ao processar webhook do Telegram:', error);
+        res.sendStatus(500);
+    }
+});
+
+// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM ---
+app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { chatId, message, botId } = req.body;
+
+    if (!chatId || !message || !botId) {
+        return res.status(400).json({ message: 'Chat ID, mensagem e ID do bot são obrigatórios.' });
+    }
+    
+    try {
+        // Obtenha o token do bot e verifique se ele pertence ao usuário logado
+        const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a você.' });
+        }
+
+        const botToken = bot.bot_token;
+        const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+        
+        const payload = {
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'HTML' // Permite formatação básica como negrito e itálico
+        };
+
+        const response = await axios.post(apiUrl, payload);
+        
+        if (response.data.ok) {
+            res.status(200).json({ message: 'Mensagem enviada com sucesso!', telegramResponse: response.data });
+        } else {
+            throw new Error(response.data.description || 'Falha ao enviar mensagem.');
+        }
+    } catch (error) {
+        console.error("Erro ao enviar mensagem do Telegram:", error.response?.data || error.message);
+        res.status(500).json({ message: 'Falha ao enviar mensagem.', details: error.response?.data?.description || error.message });
+    }
+});
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
