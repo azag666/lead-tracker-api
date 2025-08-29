@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 14:00
+// Forçando novo deploy em 29/08/2025 - 14:15
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -446,12 +446,8 @@ app.get('/api/bots/:id/users', authenticateJwt, async (req, res) => {
 
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    // Adicionado os novos campos do funil
-    const { name, bot_id, white_page_url, pixel_ids, send_type, initial_message, button_text, button_url, pix_value_cents, pix_button_text, success_message, payment_check_message, payment_check_button_text } = req.body;
-    
-    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) {
-        return res.status(400).json({ message: 'Campos básicos são obrigatórios.' });
-    }
+    const { name, bot_id, white_page_url, pixel_ids } = req.body;
+    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     
     try {
         const numeric_bot_id = parseInt(bot_id, 10);
@@ -465,13 +461,7 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
 
         await sql`BEGIN`;
         try {
-            const [newPressel] = await sql`
-                INSERT INTO pressels (
-                    seller_id, name, bot_id, bot_name, white_page_url, send_type, initial_message, button_text, button_url, pix_value_cents, pix_button_text, success_message, payment_check_message, payment_check_button_text
-                ) VALUES (
-                    ${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${send_type}, ${initial_message || null}, ${button_text || null}, ${button_url || null}, ${pix_value_cents || null}, ${pix_button_text || null}, ${success_message || null}, ${payment_check_message || null}, ${payment_check_button_text || null}
-                ) RETURNING *;
-            `;
+            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
             
             for (const pixelId of numeric_pixel_ids) {
                 await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
@@ -1316,7 +1306,7 @@ app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, 
         res.status(500).json({ message: 'Erro ao alterar status do usuário.' });
     }
 });
-app.put('/api/admin/sellers/:id/password', authenticateJwt, async (req, res) => {
+app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
     const { newPassword } = req.body;
@@ -1329,7 +1319,7 @@ app.put('/api/admin/sellers/:id/password', authenticateJwt, async (req, res) => 
         res.status(500).json({ message: 'Erro ao alterar senha.' });
     }
 });
-app.put('/api/admin/sellers/:id/credentials', authenticateJwt, async (req, res) => {
+app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
     const { pushinpay_token, cnpay_public_key, cnpay_secret_key } = req.body;
