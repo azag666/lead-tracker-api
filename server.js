@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 12:45
+// Forçando novo deploy em 29/08/2025 - 13:40
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -975,7 +975,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     }
 });
 
-// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE) ---
+// ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE)
 app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { chatId, message, botId } = req.body;
@@ -1046,7 +1046,7 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const botId = parseInt(id, 10);
     const sellerId = req.user.id;
-    const { message, buttonText, buttonUrl } = req.body;
+    const { message, buttonText, buttonUrl, pixCode } = req.body;
 
     if (!message) {
         return res.status(400).json({ message: 'A mensagem é obrigatória.' });
@@ -1066,8 +1066,8 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
         }
 
         const [log] = await sql`
-            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
-            VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null})
+            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url, pix_code)
+            VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null}, ${pixCode || null})
             RETURNING id;
         `;
         const logId = log.id;
@@ -1081,9 +1081,14 @@ app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
             const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
 
             for (const user of users) {
+                let finalMessage = message;
+                if (pixCode) {
+                    finalMessage += `\n\n<code>${pixCode}</code>`;
+                }
+
                 const payload = {
                     chat_id: user.chat_id,
-                    text: message,
+                    text: finalMessage,
                     parse_mode: 'HTML'
                 };
 
