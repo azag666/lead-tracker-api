@@ -191,7 +191,6 @@ app.post('/api/sellers/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
         
-        // CORREÇÃO AQUI: Adicionado 'is_active' com valor TRUE no INSERT
         await sql`INSERT INTO sellers (name, email, password_hash, api_key, phone_number, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, ${phoneNumber}, TRUE)`;
         
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
@@ -234,7 +233,6 @@ app.post('/api/sellers/login', async (req, res) => {
     }
 });
 
-// O restante do código permanece o mesmo...
 // --- ROTA DE DADOS DO PAINEL ---
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -360,8 +358,8 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     try {
         const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
 
-        // NOVO: Registrar o webhook do Telegram.
-        const webhookUrl = `${req.protocol}://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
+        // CORREÇÃO AQUI: Trocado 'req.protocol' por 'https'
+        const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
         await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
         console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
 
@@ -384,6 +382,7 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     }
 });
 
+// O restante do código permanece o mesmo...
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_id } = req.body;
@@ -418,25 +417,21 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     }
 });
 
-// NOVA ROTA: Busca de usuários de um bot
 app.get('/api/bots/:id/users', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
     const botId = parseInt(id, 10);
 
-    // Valida se o ID do bot é um número válido
     if (isNaN(botId)) {
         return res.status(400).json({ message: 'ID do bot inválido.' });
     }
 
     try {
-        // Verifica se o bot existe e pertence ao vendedor logado
         const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
         }
 
-        // Busca todos os usuários (chats) associados a este bot
         const users = await sql`SELECT chat_id, first_name, last_name, username FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${req.user.id} ORDER BY created_at DESC;`;
 
         res.status(200).json(users);
