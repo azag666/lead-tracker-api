@@ -1333,6 +1333,7 @@ async function checkPendingTransactions() {
 setInterval(checkPendingTransactions, 120000);
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
+// ... (Nenhuma alteração aqui, código do admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
