@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 14:30
+// Forçando novo deploy em 29/08/2025 - 14:15
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -984,7 +984,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     }
 });
 
-// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE) ---
+// ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE)
 app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { chatId, message, botId } = req.body;
