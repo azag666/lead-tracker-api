@@ -381,6 +381,29 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     }
 });
 
+// NOVA ROTA: Busca de usuários de um bot
+app.get('/api/bots/:id/users', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+
+    try {
+        // Verifica se o bot existe e pertence ao vendedor logado
+        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${id} AND seller_id = ${req.user.id}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
+        }
+
+        // Busca todos os usuários (chats) associados a este bot
+        const users = await sql`SELECT chat_id, first_name, last_name, username FROM telegram_chats WHERE bot_id = ${id} AND seller_id = ${req.user.id} ORDER BY created_at DESC;`;
+
+        res.status(200).json(users);
+    } catch (error) {
+        console.error("Erro ao buscar usuários do bot:", error);
+        res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
+    }
+});
+
+
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
@@ -514,6 +537,7 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
 // --- ROTA DE RASTREAMENTO E CONSULTAS ---
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
+    const apiKey = req.headers['x-api-key'];
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
     
     if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
@@ -1314,3 +1338,4 @@ app.get('/admin', (req, res) => {
 });
 
 module.exports = app;
+eof
