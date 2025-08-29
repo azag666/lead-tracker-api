@@ -113,6 +113,36 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     }
 }
 
+// --- FUNÇÃO PARA VERIFICAR E CONCEDER CONQUISTAS ---
+async function checkAndAwardAchievements(seller_id) {
+    const sql = getDbConnection();
+    try {
+        const [totalRevenueResult] = await sql`
+            SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
+            FROM pix_transactions pt
+            JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE c.seller_id = ${seller_id} AND pt.status = 'paid';
+        `;
+        const totalRevenueCents = Math.round(totalRevenueResult.total_revenue * 100);
+
+        const achievements = await sql`
+            SELECT a.id, a.sales_goal
+            FROM achievements a
+            LEFT JOIN user_achievements ua ON a.id = ua.achievement_id AND ua.seller_id = ${seller_id}
+            WHERE ua.id IS NULL OR ua.is_completed = FALSE;
+        `;
+        
+        for (const achievement of achievements) {
+            if (totalRevenueCents >= achievement.sales_goal) {
+                await sql`INSERT INTO user_achievements (seller_id, achievement_id, is_completed, completion_date) VALUES (${seller_id}, ${achievement.id}, TRUE, NOW());`;
+                console.log(`Conquista concedida ao vendedor ${seller_id}.`);
+            }
+        }
+    } catch (error) {
+        console.error("Erro ao verificar e conceder conquistas:", error);
+    }
+}
+
 
 // --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
@@ -197,6 +227,68 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
+
+// --- NOVA ROTA PARA CONQUISTAS E RANKING ---
+app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const sellerId = req.user.id;
+        
+        // Obter as conquistas do usuário
+        const userAchievements = await sql`
+            SELECT a.title, a.description, ua.is_completed, a.sales_goal
+            FROM achievements a
+            JOIN user_achievements ua ON a.id = ua.achievement_id
+            WHERE ua.seller_id = ${sellerId}
+            ORDER BY a.sales_goal ASC;
+        `;
+
+        // Obter o ranking dos 5 principais vendedores
+        const topSellersRanking = await sql`
+            SELECT s.name, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
+            FROM sellers s
+            LEFT JOIN clicks c ON s.id = c.seller_id
+            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
+            GROUP BY s.id, s.name
+            ORDER BY total_revenue DESC
+            LIMIT 5;
+        `;
+        
+        // Obter o ranking do usuário atual
+        const [userRevenue] = await sql`
+            SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
+            FROM sellers s
+            LEFT JOIN clicks c ON s.id = c.seller_id
+            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
+            WHERE s.id = ${sellerId}
+            GROUP BY s.id;
+        `;
+
+        const userRankResult = await sql`
+            SELECT COUNT(T1.id) + 1 AS rank
+            FROM (
+                SELECT s.id
+                FROM sellers s
+                LEFT JOIN clicks c ON s.id = c.seller_id
+                LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
+                GROUP BY s.id
+                HAVING COALESCE(SUM(pt.pix_value), 0) > ${userRevenue.total_revenue}
+            ) AS T1;
+        `;
+        
+        const userRank = userRankResult[0].rank;
+
+        res.json({
+            userAchievements,
+            topSellersRanking,
+            currentUserRank: userRank
+        });
+    } catch (error) {
+        console.error("Erro ao buscar conquistas e ranking:", error);
+        res.status(500).json({ message: 'Erro ao buscar dados de ranking.' });
+    }
+});
+
 
 // --- ROTAS DE GERENCIAMENTO (CRUD) ---
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
@@ -787,6 +879,7 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
+            await checkAndAwardAchievements(seller.id); 
         }
     } catch(error) {
         console.error("Erro ao lidar com pagamento bem-sucedido:", error);
