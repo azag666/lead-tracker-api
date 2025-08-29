@@ -1,3 +1,4 @@
+// Forçando novo deploy em 29/08/2025 - 12:45
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -174,7 +175,6 @@ app.post('/api/sellers/register', async (req, res) => {
     }
     
     try {
-        // Valide o código de verificação com a Twilio
         const verification = await twilioClient.verify.v2.services(process.env.TWILIO_SERVICE_SID)
             .verificationChecks
             .create({ to: phoneNumber, code: verificationCode });
@@ -269,7 +269,6 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
     try {
         const sellerId = req.user.id;
         
-        // Obter as conquistas do usuário
         const userAchievements = await sql`
             SELECT a.title, a.description, ua.is_completed, a.sales_goal
             FROM achievements a
@@ -278,7 +277,6 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
             ORDER BY a.sales_goal ASC;
         `;
 
-        // Obter o ranking dos 5 principais vendedores
         const topSellersRanking = await sql`
             SELECT s.name, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
             FROM sellers s
@@ -289,7 +287,6 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
             LIMIT 5;
         `;
         
-        // Obter o ranking do usuário atual
         const [userRevenue] = await sql`
             SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
             FROM sellers s
@@ -358,14 +355,20 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     try {
         const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
 
-        // CORREÇÃO AQUI: Trocado 'req.protocol' por 'https'
         const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
         await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
         console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
 
         res.status(201).json(newBot[0]);
     } catch (error) {
-        if (error.code === '23505') { return res.status(409).json({ message: 'Um bot com este nome já existe.' }); }
+        if (error.code === '23505') {
+            if (error.constraint_name === 'telegram_bots_bot_token_key') {
+                return res.status(409).json({ message: 'Este token de bot já está em uso.' });
+            }
+             if (error.constraint_name === 'telegram_bots_bot_name_key') {
+                return res.status(409).json({ message: 'Um bot com este nome de usuário já existe.' });
+            }
+        }
         console.error("Erro ao salvar bot:", error);
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
@@ -382,7 +385,6 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     }
 });
 
-// O restante do código permanece o mesmo...
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_id } = req.body;
@@ -937,7 +939,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { message } = req.body;
 
     if (!message || !message.chat) {
-        // Ignora atualizações sem mensagens ou chats, como edições de mensagens.
         return res.status(200).send('No message found');
     }
 
@@ -950,10 +951,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 
     try {
         const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) return res.status(404).send('Bot not found');
+        if (!bot) {
+             console.warn(`Webhook recebido para botId não encontrado: ${botId}`);
+             return res.status(404).send('Bot not found');
+        }
 
-        // Salva ou atualiza os dados do usuário no banco de dados.
-        // A cláusula ON CONFLICT evita duplicar registros.
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
             VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
@@ -973,7 +975,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     }
 });
 
-// --- ROTA DE ENVIO DE MENSAGENS DO TELEGRAM ---
+// ROTA DE ENVIO DE MENSAGENS DO TELEGRAM (SIMPLES, USADA INTERNAMENTE)
 app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { chatId, message, botId } = req.body;
@@ -983,7 +985,6 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
     }
     
     try {
-        // Obtenha o token do bot e verifique se ele pertence ao usuário logado
         const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${req.user.id}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não pertence a você.' });
@@ -995,7 +996,7 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
         const payload = {
             chat_id: chatId,
             text: message,
-            parse_mode: 'HTML' // Permite formatação básica como negrito e itálico
+            parse_mode: 'HTML'
         };
 
         const response = await axios.post(apiUrl, payload);
@@ -1006,10 +1007,130 @@ app.post('/api/telegram/send-message', authenticateJwt, async (req, res) => {
             throw new Error(response.data.description || 'Falha ao enviar mensagem.');
         }
     } catch (error) {
+        if (error.response && error.response.status === 403) {
+            console.warn(`Falha ao enviar mensagem: O usuário (chat_id: ${chatId}) bloqueou o bot.`);
+            return res.status(200).json({ status: 'skipped', message: `Usuário bloqueou o bot, mensagem não enviada.` });
+        }
+        
         console.error("Erro ao enviar mensagem do Telegram:", error.response?.data || error.message);
         res.status(500).json({ message: 'Falha ao enviar mensagem.', details: error.response?.data?.description || error.message });
     }
 });
+
+// --- NOVO: ROTA PARA BUSCAR HISTÓRICO DE DISPAROS ---
+app.get('/api/bots/:id/mass-sends', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const botId = parseInt(id, 10);
+    
+    if (isNaN(botId)) {
+        return res.status(400).json({ message: 'ID do bot inválido.' });
+    }
+
+    try {
+        const history = await sql`
+            SELECT * FROM mass_sends 
+            WHERE bot_id = ${botId} AND seller_id = ${req.user.id} 
+            ORDER BY sent_at DESC;
+        `;
+        res.status(200).json(history);
+    } catch (error) {
+        console.error("Erro ao buscar histórico de disparos:", error);
+        res.status(500).json({ message: 'Erro ao buscar histórico.' });
+    }
+});
+
+// --- NOVO: ROTA PARA REALIZAR O DISPARO EM MASSA ---
+app.post('/api/bots/:id/mass-send', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const botId = parseInt(id, 10);
+    const sellerId = req.user.id;
+    const { message, buttonText, buttonUrl } = req.body;
+
+    if (!message) {
+        return res.status(400).json({ message: 'A mensagem é obrigatória.' });
+    }
+    if (buttonText && !buttonUrl) {
+        return res.status(400).json({ message: 'A URL do botão é obrigatória quando o texto do botão é fornecido.' });
+    }
+
+    try {
+        // Busca o bot e os usuários
+        const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado.' });
+        }
+        const users = await sql`SELECT chat_id FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${sellerId}`;
+        if (users.length === 0) {
+            return res.status(404).json({ message: 'Nenhum usuário encontrado para este bot.' });
+        }
+
+        // Cria o registro do disparo no histórico
+        const [log] = await sql`
+            INSERT INTO mass_sends (seller_id, bot_id, message_content, button_text, button_url)
+            VALUES (${sellerId}, ${botId}, ${message}, ${buttonText || null}, ${buttonUrl || null})
+            RETURNING id;
+        `;
+        const logId = log.id;
+        
+        res.status(202).json({ message: `Disparo iniciado para ${users.length} usuários.`, logId: logId });
+        
+        // Inicia o processo de envio em segundo plano (sem travar a resposta)
+        (async () => {
+            let successCount = 0;
+            let failureCount = 0;
+            const botToken = bot.bot_token;
+            const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+
+            for (const user of users) {
+                const payload = {
+                    chat_id: user.chat_id,
+                    text: message,
+                    parse_mode: 'HTML'
+                };
+
+                // Adiciona o botão se os dados foram fornecidos
+                if (buttonText && buttonUrl) {
+                    payload.reply_markup = {
+                        inline_keyboard: [
+                            [{ text: buttonText, url: buttonUrl }]
+                        ]
+                    };
+                }
+
+                try {
+                    await axios.post(apiUrl, payload, { timeout: 5000 });
+                    successCount++;
+                } catch (error) {
+                    failureCount++;
+                    if (error.response && error.response.status === 403) {
+                        console.warn(`Usuário ${user.chat_id} bloqueou o bot.`);
+                    } else {
+                        console.error(`Falha ao enviar para ${user.chat_id}:`, error.message);
+                    }
+                }
+                // Pausa para evitar limites da API do Telegram
+                await new Promise(resolve => setTimeout(resolve, 200)); 
+            }
+
+            // Atualiza o log com os resultados finais
+            await sql`
+                UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount}
+                WHERE id = ${logId};
+            `;
+            console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
+        })();
+
+    } catch (error) {
+        console.error("Erro no disparo em massa:", error);
+        // Retorna um erro genérico se a falha for antes do loop
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
+        }
+    }
+});
+
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
