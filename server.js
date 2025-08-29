@@ -22,9 +22,8 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:3000'; // Importante para o webhook
 
-// --- MIDDLEWARES ---
+// --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -40,20 +39,7 @@ async function authenticateJwt(req, res, next) {
     });
 }
 
-async function checkRecuperadorAccess(req, res, next) {
-    const sql = getDbConnection();
-    try {
-        const [seller] = await sql`SELECT has_recuperador_access FROM sellers WHERE id = ${req.user.id}`;
-        if (seller && seller.has_recuperador_access) {
-            next();
-        } else {
-            res.status(403).json({ message: 'Você não tem acesso a esta funcionalidade.' });
-        }
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao verificar permissões.' });
-    }
-}
-
+// --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
 async function logApiRequest(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) return next();
@@ -106,7 +92,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
         pixData = response.data;
         acquirer = isCnpay ? "CNPay" : "Oasy.fy";
-        return { qr_code_text: pixData.pix.code, qr_code_base64: `data:image/png;base64,${pixData.pix.base64}`, transaction_id: pixData.transactionId, acquirer };
+        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer };
 
     } else { // Padrão é PushinPay
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
@@ -187,7 +173,7 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token, has_recuperador_access FROM sellers WHERE id = ${sellerId}`;
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
@@ -242,22 +228,12 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_name, bot_token } = req.body;
     if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
-    
     try {
-        const webhookUrl = `${API_BASE_URL}/api/telegram/webhook/${bot_token}`;
-        await axios.get(`https://api.telegram.org/bot${bot_token}/setWebhook?url=${webhookUrl}`);
-        
-        const [newBot] = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
-        res.status(201).json(newBot);
-
+        const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
+        res.status(201).json(newBot[0]);
     } catch (error) {
-        if (error.code === '23505') { 
-            return res.status(409).json({ message: 'Um bot com este token já foi cadastrado.' }); 
-        }
-        if (error.response && error.response.status === 401) {
-            return res.status(400).json({ message: 'Token do bot inválido. Verifique e tente novamente.' });
-        }
-        console.error("Erro ao salvar e registrar webhook do bot:", error);
+        if (error.code === '23505') { return res.status(409).json({ message: 'Um bot com este nome já existe.' }); }
+        console.error("Erro ao salvar bot:", error);
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
 });
@@ -397,7 +373,6 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o checkout.' });
     }
 });
-
 
 // --- ROTAS DE CONFIGURAÇÃO ---
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
@@ -600,7 +575,7 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE GERAÇÃO DE PIX E TESTES ---
+// --- ROTA DE GERAÇÃO DE PIX ---
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -654,6 +629,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 
+// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -689,6 +665,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 });
 
 
+// --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -725,6 +702,8 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     }
 });
 
+
+// --- ROTA PARA TESTAR A ROTA DE PRIORIDADE ---
 app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -791,7 +770,8 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- FUNÇÃO DE PAGAMENTO BEM-SUCEDIDO E WEBHOOKS ---
+
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
@@ -813,6 +793,7 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
     }
 }
 
+// --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
@@ -853,7 +834,7 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     res.sendStatus(200);
 });
 
-// --- FUNÇÕES DE ENVIO PARA SERVIÇOS EXTERNOS ---
+// --- FUNÇÃO DE ENVIO PARA UTIFY ---
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     if (!sellerData.utmify_api_token) {
         return;
@@ -892,6 +873,7 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 
+// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
@@ -1018,114 +1000,6 @@ async function checkPendingTransactions() {
     }
 }
 setInterval(checkPendingTransactions, 120000);
-
-// --- ROTAS E LÓGICAS DO RECUPERADOR ---
-app.post('/api/telegram/webhook/:bot_token', async (req, res) => {
-    const { bot_token } = req.params;
-    const { message } = req.body;
-
-    if (!message || !message.text) return res.sendStatus(200);
-
-    const sql = getDbConnection();
-    try {
-        const [bot] = await sql`SELECT id, seller_id FROM telegram_bots WHERE bot_token = ${bot_token}`;
-        if (!bot) return res.sendStatus(404);
-
-        const { chat, from } = message;
-        await sql`
-            INSERT INTO telegram_chats (seller_id, bot_id, chat_id, first_name, username, last_message_text, last_message_at)
-            VALUES (${bot.seller_id}, ${bot.id}, ${chat.id}, ${from.first_name}, ${from.username}, ${message.text}, NOW())
-            ON CONFLICT (bot_id, chat_id) 
-            DO UPDATE SET 
-                last_message_text = EXCLUDED.last_message_text,
-                last_message_at = EXCLUDED.last_message_at;
-        `;
-        
-        const [lastBroadcast] = await sql`SELECT id FROM broadcasts WHERE bot_id = ${bot.id} AND status = 'sending' ORDER BY created_at DESC LIMIT 1`;
-        if(lastBroadcast) {
-            await sql`UPDATE broadcasts SET recovered_leads = recovered_leads + 1 WHERE id = ${lastBroadcast.id}`;
-        }
-
-        res.sendStatus(200);
-    } catch (error) {
-        console.error("Erro no webhook do Telegram:", error);
-        res.sendStatus(500);
-    }
-});
-
-app.post('/api/broadcasts', authenticateJwt, checkRecuperadorAccess, async (req, res) => {
-    const { botId, messageText } = req.body;
-    if (!botId || !messageText) {
-        return res.status(400).json({ message: "ID do Bot e texto da mensagem são obrigatórios." });
-    }
-
-    const sql = getDbConnection();
-    try {
-        const chats = await sql`SELECT chat_id FROM telegram_chats WHERE bot_id = ${botId} AND seller_id = ${req.user.id}`;
-        if (chats.length === 0) {
-            return res.status(404).json({ message: "Nenhum lead encontrado para este bot. Conecte o bot e aguarde novas interações para construir sua lista." });
-        }
-
-        const [broadcast] = await sql`
-            INSERT INTO broadcasts (seller_id, bot_id, message_text, total_recipients, status)
-            VALUES (${req.user.id}, ${botId}, ${messageText}, ${chats.length}, 'sending')
-            RETURNING id;
-        `;
-        
-        sendBroadcastInBackground(broadcast.id, req.user.id, botId, messageText, chats);
-        res.status(202).json({ message: `Sua campanha foi iniciada e será enviada para ${chats.length} leads.` });
-    } catch (error) {
-        console.error("Erro ao criar broadcast:", error);
-        res.status(500).json({ message: "Erro ao iniciar a campanha." });
-    }
-});
-
-app.get('/api/broadcasts/:botId', authenticateJwt, checkRecuperadorAccess, async (req, res) => {
-    const { botId } = req.params;
-    const sql = getDbConnection();
-    try {
-        const history = await sql`
-            SELECT id, message_text, status, total_recipients, sent_count, recovered_leads, created_at 
-            FROM broadcasts
-            WHERE bot_id = ${botId} AND seller_id = ${req.user.id}
-            ORDER BY created_at DESC;
-        `;
-        res.json(history);
-    } catch (error) {
-        res.status(500).json({ message: "Erro ao buscar histórico." });
-    }
-});
-
-async function sendBroadcastInBackground(broadcastId, sellerId, botId, messageText, chats) {
-    const sql = getDbConnection();
-    const [bot] = await sql`SELECT bot_token FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
-    if (!bot) return;
-
-    let sent = 0;
-    let failed = 0;
-
-    for (const chat of chats) {
-        try {
-            await axios.post(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, {
-                chat_id: chat.chat_id,
-                text: messageText,
-                parse_mode: 'Markdown'
-            });
-            sent++;
-        } catch (error) {
-            failed++;
-        }
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
-
-    await sql`
-        UPDATE broadcasts 
-        SET status = 'completed', sent_count = ${sent}, completed_at = NOW()
-        WHERE id = ${broadcastId};
-    `;
-    console.log(`Broadcast ${broadcastId} finalizado. Enviado: ${sent}, Falhas: ${failed}`);
-}
-
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
 function authenticateAdmin(req, res, next) {
