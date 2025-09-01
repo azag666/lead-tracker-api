@@ -1,4 +1,4 @@
-// Forçando novo deploy em 29/08/2025 - 20:10 (Cadastro simplificado e remoção do Twilio)
+// CÓDIGO MODIFICADO: Funcionalidades de Disparo em Massa e Webhook de Bot Removidas
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -8,8 +8,6 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-// A dependência do Twilio não é mais necessária
-// const twilio = require('twilio'); 
 
 const app = express();
 app.use(cors());
@@ -25,8 +23,6 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-
-// --- CONFIGURAÇÃO TWILIO REMOVIDA ---
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -331,9 +327,10 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     try {
         const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
 
-        const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
-        await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
-        console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
+        // REMOVIDO: A linha abaixo foi removida para não configurar o webhook e interferir com o ManyChat.
+        // const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
+        // await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
+        // console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
 
         res.status(201).json(newBot[0]);
     } catch (error) {
@@ -395,28 +392,8 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     }
 });
 
-app.get('/api/bots/users', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { botIds } = req.query; // Recebe uma string de IDs: "1,2,3"
-
-    if (!botIds) {
-        return res.status(400).json({ message: 'IDs dos bots são obrigatórios.' });
-    }
-    const botIdArray = botIds.split(',').map(id => parseInt(id.trim(), 10));
-
-    try {
-        // Pega todos os usuários únicos dos bots selecionados
-        const users = await sql`
-            SELECT DISTINCT ON (chat_id) chat_id, first_name, last_name, username 
-            FROM telegram_chats 
-            WHERE bot_id = ANY(${botIdArray}) AND seller_id = ${req.user.id};
-        `;
-        res.status(200).json({ total_users: users.length });
-    } catch (error) {
-        console.error("Erro ao buscar contagem de usuários do bot:", error);
-        res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
-    }
-});
+// REMOVIDO: A rota abaixo foi removida por ser parte da funcionalidade de disparo.
+// app.get('/api/bots/users', ...);
 
 
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
@@ -907,193 +884,13 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE WEBHOOK DO TELEGRAM ---
-app.post('/api/webhook/telegram/:botId', async (req, res) => {
-    const sql = getDbConnection();
-    const { botId } = req.params;
+// REMOVIDO: Toda a rota de webhook do Telegram foi removida.
+// app.post('/api/webhook/telegram/:botId', ...);
 
-    if (req.body.callback_query) {
-        const { callback_query } = req.body;
-        const chatId = callback_query.message.chat.id;
-        const [action, ...params] = callback_query.data.split('|');
-
-        try {
-            const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-            if (!bot) { return res.status(404).send('Bot not found'); }
-            const botToken = bot.bot_token;
-            const apiUrl = `https://api.telegram.org/bot${botToken}`;
-
-            switch(action) {
-                case 'generate_pix':
-                    const [value] = params;
-                    const value_cents = parseInt(value, 10);
-                    const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
-                    if (!click) { throw new Error('Não foi possível criar um registro de clique.'); }
-                    const click_id_internal = click.id;
-                    const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
-                    await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
-                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
-                    const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
-                    if (providerOrder.length === 0) providerOrder.push('pushinpay');
-                    let pixResult;
-                    for (const provider of providerOrder) {
-                        try {
-                            pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
-                            if (pixResult) break;
-                        } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
-                    }
-                    if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
-                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
-                    const pixMessagePayload = { chat_id: chatId, text: `<code>${pixResult.qr_code_text}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] } };
-                    await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
-                    const confirmationPayload = { chat_id: chatId, text: "Após efetuar o pagamento, clique no botão abaixo para verificar.", parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] } };
-                    await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
-                    break;
-                case 'check_payment':
-                    const [txId] = params;
-                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
-                    let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
-                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) { feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado."; }
-                    await axios.post(`${apiUrl}/sendMessage`, { chat_id: chatId, text: feedbackMessage });
-                    break;
-                case 'copy_pix':
-                     await axios.post(`${apiUrl}/answerCallbackQuery`, { callback_query_id: callback_query.id, text: "Copiado! Agora é só colar no app do seu banco.", show_alert: true });
-                    break;
-            }
-        } catch (error) { console.error('Erro no processamento do callback do webhook:', error.message, error.stack); }
-        return res.sendStatus(200);
-    }
-
-    const { message } = req.body;
-    if (!message || !message.chat) { return res.status(200).send('No message found'); }
-    const chatId = message.chat.id;
-
-    if (chatId < 0) {
-        console.log(`Mensagem do grupo/canal ${chatId} ignorada.`);
-        return res.sendStatus(200);
-    }
-    
-    const userId = message.from.id;
-    const firstName = message.from.first_name;
-    const lastName = message.from.last_name || null;
-    const username = message.from.username || null;
-    const clickId = message.text && message.text.startsWith('/start ') ? message.text.split(' ')[1] : null;
-
-    try {
-        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) { return res.status(404).send('Bot not found'); }
-        await sql`
-            INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
-            VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
-            ON CONFLICT (chat_id) DO UPDATE SET
-                user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
-                username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
-        `;
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('Erro ao processar webhook do Telegram (texto):', error);
-        res.sendStatus(500);
-    }
-});
-
-
-// --- ROTAS DA CENTRAL DE DISPAROS ---
-app.get('/api/dispatches', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
-        res.status(200).json(dispatches);
-    } catch (error) {
-        console.error("Erro ao buscar histórico de disparos:", error);
-        res.status(500).json({ message: 'Erro ao buscar histórico.' });
-    }
-});
-
-app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    try {
-        const details = await sql`
-            SELECT d.*, u.first_name, u.username
-            FROM mass_send_details d
-            LEFT JOIN telegram_chats u ON d.chat_id = u.chat_id
-            WHERE d.mass_send_id = ${id}
-            ORDER BY d.sent_at;
-        `;
-        res.status(200).json(details);
-    } catch (error) {
-        console.error("Erro ao buscar detalhes do disparo:", error);
-        res.status(500).json({ message: 'Erro ao buscar detalhes.' });
-    }
-});
-
-// ROTA DE DISPARO EM MASSA (MULTI-BOT)
-app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
-    const sellerId = req.user.id;
-    const { botIds, flowType, initialText, ctaButtonText, pixValue, externalLink, imageUrl } = req.body;
-
-    if (!botIds || botIds.length === 0 || !initialText || !ctaButtonText) {
-        return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
-    }
-
-    try {
-        const bots = await sql`SELECT id, bot_token FROM telegram_bots WHERE id = ANY(${botIds}) AND seller_id = ${sellerId}`;
-        if (bots.length === 0) return res.status(404).json({ message: 'Nenhum bot válido selecionado.' });
-        
-        const users = await sql`SELECT DISTINCT ON (chat_id) chat_id, bot_id FROM telegram_chats WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
-        if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para os bots selecionados.' });
-
-        const [log] = await sql`INSERT INTO mass_sends (seller_id, message_content, button_text, button_url, image_url) VALUES (${sellerId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}, ${imageUrl || null}) RETURNING id;`;
-        const logId = log.id;
-        
-        res.status(202).json({ message: `Disparo agendado para ${users.length} usuários.`, logId });
-        
-        (async () => {
-            let successCount = 0;
-            let failureCount = 0;
-            const botTokenMap = new Map(bots.map(b => [b.id, b.bot_token]));
-
-            for (const user of users) {
-                const botToken = botTokenMap.get(user.bot_id);
-                if (!botToken) continue;
-
-                const endpoint = imageUrl ? 'sendPhoto' : 'sendMessage';
-                const apiUrl = `https://api.telegram.org/bot${botToken}/${endpoint}`;
-                let payload;
-
-                if (flowType === 'pix_flow') {
-                    const valueInCents = Math.round(parseFloat(pixValue) * 100);
-                    const callback_data = `generate_pix|${valueInCents}`;
-                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] } };
-                } else {
-                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] } };
-                }
-                
-                if (!imageUrl) { delete payload.photo; delete payload.caption; } else { delete payload.text; }
-
-                try {
-                    await axios.post(apiUrl, payload, { timeout: 10000 });
-                    successCount++;
-                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status) VALUES (${logId}, ${user.chat_id}, 'success')`;
-                } catch (error) {
-                    failureCount++;
-                    const errorMessage = error.response?.data?.description || error.message;
-                    console.error(`Falha ao enviar para ${user.chat_id}: ${errorMessage}`);
-                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status, details) VALUES (${logId}, ${user.chat_id}, 'failure', ${errorMessage})`;
-                }
-                await new Promise(resolve => setTimeout(resolve, 300));
-            }
-
-            await sql`UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount} WHERE id = ${logId};`;
-            console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
-        })();
-
-    } catch (error) {
-        console.error("Erro no disparo em massa:", error);
-        if (!res.headersSent) res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
-    }
-});
+// REMOVIDO: Todas as rotas da Central de Disparos foram removidas.
+// app.get('/api/dispatches', ...);
+// app.get('/api/dispatches/:id', ...);
+// app.post('/api/bots/mass-send', ...);
 
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
@@ -1336,6 +1133,7 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
+// ... (O restante das rotas de admin continua igual)
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -1455,6 +1253,7 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
     }
 });
+
 
 app.get('/admin', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
