@@ -1,4 +1,4 @@
-// Forçando novo deploy em 01/09/2025 - 09:35 (Otimização Vercel com WebSockets e Cron Jobs)
+// Forçando novo deploy em 01/09/2025 - 10:15 (Correção final de variável de DB)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -50,7 +50,8 @@ wss.on('connection', (ws) => {
 
 // --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
 function getDbConnection() {
-    return neon(process.env.DATABASE_URL);
+    // CORREÇÃO: Usando a nova variável de ambiente para evitar conflito com a integração da Vercel.
+    return neon(process.env.NEON_POSTGRES_URL);
 }
 
 // --- CONFIGURAÇÃO ---
@@ -58,7 +59,7 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-const CRON_SECRET = process.env.CRON_SECRET; // Adicione esta variável de ambiente na Vercel
+const CRON_SECRET = process.env.CRON_SECRET;
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -268,7 +269,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         
         const settings = settingsResult[0] || {};
         
-        // Adiciona cabeçalho de cache para a Vercel Edge
         res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=120');
         
         res.json({ settings, pixels, pressels, bots, checkouts });
@@ -1100,7 +1100,7 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
 });
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (MODIFICADA) ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(transaction_id, customerData) {
     const sql = getDbConnection();
     try {
@@ -1117,7 +1117,7 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
         if (wsClient && wsClient.readyState === wsClient.OPEN) {
             wsClient.send(JSON.stringify({ type: 'payment_confirmed' }));
             console.log(`Notificação de pagamento enviada via WebSocket para ${transaction.provider_transaction_id}`);
-            wsClient.close(); // Fecha a conexão após a confirmação
+            wsClient.close();
         }
 
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
@@ -1136,7 +1136,7 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
     }
 }
 
-// --- WEBHOOKS (MODIFICADOS) ---
+// --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
@@ -1279,9 +1279,9 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
     }
 }
 
+
 // --- NOVA ROTA PARA CRON JOB DA VERCEL ---
 app.get('/api/cron/check-pending-transactions', async (req, res) => {
-    // Protege a rota para que só possa ser executada com a chave secreta
     if (req.query.secret !== CRON_SECRET) {
         return res.status(401).json({ message: 'Acesso não autorizado.' });
     }
@@ -1471,10 +1471,9 @@ app.get('/admin', (req, res) => {
 
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
-// A porta é gerenciada pela Vercel, mas é bom ter para desenvolvimento local
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
 
-module.exports = server; // Exportar o 'server' para a Vercel
+module.exports = server;
