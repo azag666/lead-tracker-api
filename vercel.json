@@ -2,22 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "lead-tracker-api/server.js",
+      "src": "server.js",
       "use": "@vercel/node"
-    },
-    {
-      "src": "saas3.0/index.html",
-      "use": "@vercel/static"
     }
   ],
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "lead-tracker-api/server.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "saas3.0/index.html"
+      "dest": "server.js"
     }
   ]
 }
