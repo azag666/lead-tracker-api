@@ -11,5 +11,11 @@
       "src": "/api/(.*)",
       "dest": "server.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/check-pending-transactions?secret=SUA_CHAVE_SECRETA_AQUI",
+      "schedule": "*/2 * * * *"
+    }
   ]
 }
