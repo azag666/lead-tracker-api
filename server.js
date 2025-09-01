@@ -964,36 +964,49 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         return res.sendStatus(200);
     }
 
+    // ##### INÍCIO DA MODIFICAÇÃO #####
     const { message } = req.body;
-    if (!message || !message.chat) { return res.status(200).send('No message found'); }
-    const chatId = message.chat.id;
-
-    if (chatId < 0) {
-        console.log(`Mensagem do grupo/canal ${chatId} ignorada.`);
-        return res.sendStatus(200);
-    }
     
-    const userId = message.from.id;
-    const firstName = message.from.first_name;
-    const lastName = message.from.last_name || null;
-    const username = message.from.username || null;
-    const clickId = message.text && message.text.startsWith('/start ') ? message.text.split(' ')[1] : null;
-
-    try {
-        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) { return res.status(404).send('Bot not found'); }
-        await sql`
-            INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
-            VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
-            ON CONFLICT (chat_id) DO UPDATE SET
-                user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
-                username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
-        `;
-        res.sendStatus(200);
-    } catch (error) {
-        console.error('Erro ao processar webhook do Telegram (texto):', error);
-        res.sendStatus(500);
+    // Se não for uma mensagem de texto, for de um grupo, ou não contiver texto, ignora.
+    if (!message || !message.text || !message.chat || message.chat.id < 0) {
+        return res.sendStatus(200); // Apenas confirma o recebimento para o Telegram.
     }
+
+    // Processa a mensagem SOMENTE se ela começar com o comando /start
+    if (message.text.startsWith('/start ')) {
+        const chatId = message.chat.id;
+        const userId = message.from.id;
+        const firstName = message.from.first_name;
+        const lastName = message.from.last_name || null;
+        const username = message.from.username || null;
+        // Pega o click_id que vem depois de '/start '
+        const clickId = message.text.split(' ')[1] || null;
+
+        try {
+            const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
+            if (!bot) { 
+                console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
+                return res.status(404).send('Bot not found'); 
+            }
+            // Insere ou atualiza os dados do chat do usuário no banco.
+            await sql`
+                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
+                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+                    username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+            `;
+        } catch (error) {
+            console.error('Erro ao processar comando /start do Telegram:', error);
+            // Se houver um erro no nosso processamento, retorna um erro 500.
+            return res.sendStatus(500);
+        }
+    }
+
+    // Para todas as mensagens (incluindo /start após o processamento, ou qualquer outra mensagem),
+    // retorna uma resposta 200 OK. Isso libera o webhook para que o ManyChat possa atuar.
+    res.sendStatus(200);
+    // ##### FIM DA MODIFICAÇÃO #####
 });
 
 
