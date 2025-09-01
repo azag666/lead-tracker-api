@@ -2,20 +2,22 @@
   "version": 2,
   "builds": [
     {
-      "src": "server.js",
+      "src": "lead-tracker-api/server.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "saas3.0/index.html",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
     {
       "src": "/api/(.*)",
-      "dest": "server.js"
-    }
-  ],
-  "crons": [
+      "dest": "lead-tracker-api/server.js"
+    },
     {
-      "path": "/api/cron/check-pending-transactions?secret=$#HotT-2024-@_Cron!7hK9bZp$vW",
-      "schedule": "*/2 * * * *"
+      "src": "/(.*)",
+      "dest": "saas3.0/index.html"
     }
   ]
 }
