@@ -616,7 +616,11 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
         const seller_id = sellerResult[0].id;
         const seller_email = sellerResult[0].email;
         
-        const db_click_id = `/start ${click_id}`;
+        // ##### INÍCIO DA MODIFICAÇÃO #####
+        // Lida com ambos os formatos: "lead000103" e "/start lead000103"
+        const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
+        // ##### FIM DA MODIFICAÇÃO #####
+        
         const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
         
         if (clickResult.length === 0) {
@@ -724,7 +728,11 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
         if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
 
-        const db_click_id = `/start ${click_id}`;
+        // ##### INÍCIO DA MODIFICAÇÃO #####
+        // Lida com ambos os formatos: "lead000103" e "/start lead000103"
+        const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
+        // ##### FIM DA MODIFICAÇÃO #####
+        
         const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
         
@@ -964,22 +972,18 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         return res.sendStatus(200);
     }
 
-    // ##### INÍCIO DA MODIFICAÇÃO #####
     const { message } = req.body;
     
-    // Se não for uma mensagem de texto, for de um grupo, ou não contiver texto, ignora.
     if (!message || !message.text || !message.chat || message.chat.id < 0) {
-        return res.sendStatus(200); // Apenas confirma o recebimento para o Telegram.
+        return res.sendStatus(200);
     }
 
-    // Processa a mensagem SOMENTE se ela começar com o comando /start
     if (message.text.startsWith('/start ')) {
         const chatId = message.chat.id;
         const userId = message.from.id;
         const firstName = message.from.first_name;
         const lastName = message.from.last_name || null;
         const username = message.from.username || null;
-        // Pega o click_id que vem depois de '/start '
         const clickId = message.text.split(' ')[1] || null;
 
         try {
@@ -988,7 +992,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                 console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
                 return res.status(404).send('Bot not found'); 
             }
-            // Insere ou atualiza os dados do chat do usuário no banco.
             await sql`
                 INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
                 VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
@@ -998,15 +1001,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
             `;
         } catch (error) {
             console.error('Erro ao processar comando /start do Telegram:', error);
-            // Se houver um erro no nosso processamento, retorna um erro 500.
             return res.sendStatus(500);
         }
     }
-
-    // Para todas as mensagens (incluindo /start após o processamento, ou qualquer outra mensagem),
-    // retorna uma resposta 200 OK. Isso libera o webhook para que o ManyChat possa atuar.
+    
     res.sendStatus(200);
-    // ##### FIM DA MODIFICAÇÃO #####
 });
 
 
