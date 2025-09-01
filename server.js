@@ -1,4 +1,4 @@
-// CÓDIGO MODIFICADO: Funcionalidades de Disparo em Massa e Webhook de Bot Removidas
+// CÓDIGO FINAL E SIMPLIFICADO: Sem Disparo em Massa e sem Webhook de Bot
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -210,6 +210,7 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
+        // Removido 'dispatches' do fetch de dados, pois a funcionalidade foi removida.
         const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
@@ -235,7 +236,7 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- NOVA ROTA PARA CONQUISTAS E RANKING ---
+// --- ROTA PARA CONQUISTAS E RANKING ---
 app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -326,12 +327,6 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
     try {
         const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
-
-        // REMOVIDO: A linha abaixo foi removida para não configurar o webhook e interferir com o ManyChat.
-        // const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
-        // await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
-        // console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
-
         res.status(201).json(newBot[0]);
     } catch (error) {
         if (error.code === '23505') { 
@@ -391,10 +386,6 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: errorMessage });
     }
 });
-
-// REMOVIDO: A rota abaixo foi removida por ser parte da funcionalidade de disparo.
-// app.get('/api/bots/users', ...);
-
 
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -529,7 +520,6 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
 // --- ROTA DE RASTREAMENTO E CONSULTAS ---
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
-    const apiKey = req.headers['x-api-key'];
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
     
     if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
@@ -884,15 +874,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// REMOVIDO: Toda a rota de webhook do Telegram foi removida.
-// app.post('/api/webhook/telegram/:botId', ...);
-
-// REMOVIDO: Todas as rotas da Central de Disparos foram removidas.
-// app.get('/api/dispatches', ...);
-// app.get('/api/dispatches/:id', ...);
-// app.post('/api/bots/mass-send', ...);
-
-
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
@@ -1133,7 +1114,6 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
-// ... (O restante das rotas de admin continua igual)
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -1256,6 +1236,11 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
 
 
 app.get('/admin', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Rota para servir o frontend principal
+app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
