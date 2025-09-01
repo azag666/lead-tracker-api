@@ -14,7 +14,7 @@
   ],
   "crons": [
     {
-      "path": "/api/cron/check-pending-transactions?secret=SUA_CHAVE_SECRETA_AQUI",
+      "path": "/api/cron/check-pending-transactions?secret=$#HotT-2024-@_Cron!7hK9bZp$vW",
       "schedule": "*/2 * * * *"
     }
   ]
