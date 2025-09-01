@@ -1,4 +1,4 @@
-// Forçando novo deploy em 01/09/2025 - 10:15 (Correção final de variável de DB)
+// Forçando novo deploy em 29/08/2025 - 20:10 (Cadastro simplificado e remoção do Twilio)
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -8,50 +8,16 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-const http = require('http');
-const { WebSocketServer } = require('ws');
+// A dependência do Twilio não é mais necessária
+// const twilio = require('twilio'); 
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- CONFIGURAÇÃO DO SERVIDOR HTTP E WEBSOCKET ---
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server });
-
-// Mapa para armazenar conexões ativas por ID de transação
-const wsClients = new Map();
-
-wss.on('connection', (ws) => {
-    console.log('Client connected via WebSocket');
-    ws.on('message', (message) => {
-        try {
-            const data = JSON.parse(message);
-            // Cliente se registra para ouvir atualizações de uma transação específica
-            if (data.type === 'register' && data.transactionId) {
-                ws.transactionId = data.transactionId;
-                wsClients.set(data.transactionId, ws);
-                console.log(`WebSocket client registered for transactionId: ${data.transactionId}`);
-            }
-        } catch (error) {
-            console.error('Failed to process WebSocket message:', error);
-        }
-    });
-
-    ws.on('close', () => {
-        console.log('Client disconnected');
-        if (ws.transactionId) {
-            wsClients.delete(ws.transactionId);
-            console.log(`WebSocket client unregistered for transactionId: ${ws.transactionId}`);
-        }
-    });
-});
-
-
 // --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
 function getDbConnection() {
-    // CORREÇÃO: Usando a nova variável de ambiente para evitar conflito com a integração da Vercel.
-    return neon(process.env.NEON_POSTGRES_URL);
+    return neon(process.env.DATABASE_URL);
 }
 
 // --- CONFIGURAÇÃO ---
@@ -59,7 +25,8 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-const CRON_SECRET = process.env.CRON_SECRET;
+
+// --- CONFIGURAÇÃO TWILIO REMOVIDA ---
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -94,7 +61,6 @@ async function logApiRequest(req, res, next) {
     }
     next();
 }
-
 
 // --- FUNÇÃO HELPER DE GERAÇÃO DE PIX ---
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
@@ -152,7 +118,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     }
 }
 
-
 // --- FUNÇÃO PARA VERIFICAR E CONCEDER CONQUISTAS ---
 async function checkAndAwardAchievements(seller_id) {
     const sql = getDbConnection();
@@ -185,6 +150,10 @@ async function checkAndAwardAchievements(seller_id) {
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
+
+// *** ROTA /api/sellers/send-verification REMOVIDA ***
+
+// *** ROTA DE REGISTRO SIMPLIFICADA ***
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -202,6 +171,7 @@ app.post('/api/sellers/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
         
+        // Query de inserção atualizada para não incluir phone_number
         await sql`INSERT INTO sellers (name, email, password_hash, api_key, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, TRUE)`;
         
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
@@ -244,8 +214,7 @@ app.post('/api/sellers/login', async (req, res) => {
     }
 });
 
-
-// --- ROTA DE DADOS DO PAINEL (COM CACHE) ---
+// --- ROTA DE DADOS DO PAINEL ---
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -268,16 +237,12 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         const [settingsResult, pixels, pressels, bots, checkouts] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise]);
         
         const settings = settingsResult[0] || {};
-        
-        res.setHeader('Cache-Control', 's-maxage=60, stale-while-revalidate=120');
-        
         res.json({ settings, pixels, pressels, bots, checkouts });
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
-
 
 // --- NOVA ROTA PARA CONQUISTAS E RANKING ---
 app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
@@ -806,6 +771,42 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 
+// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX
+app.get('/api/pix/status/:transaction_id', async (req, res) => {
+    const sql = getDbConnection();
+    const apiKey = req.headers['x-api-key'];
+    const { transaction_id } = req.params;
+
+    if (!apiKey) return res.status(401).json({ message: 'API Key não fornecida.' });
+    if (!transaction_id) return res.status(400).json({ message: 'ID da transação é obrigatório.' });
+
+    try {
+        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
+            return res.status(401).json({ message: 'API Key inválida.' });
+        }
+        const seller_id = sellerResult[0].id;
+
+        const transactionResult = await sql`
+            SELECT pt.status
+            FROM pix_transactions pt
+            JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id})
+              AND c.seller_id = ${seller_id}`;
+
+        if (transactionResult.length === 0) {
+            return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
+        }
+
+        res.status(200).json({ status: transactionResult[0].status });
+
+    } catch (error) {
+        console.error("Erro ao consultar status da transação:", error);
+        res.status(500).json({ message: 'Erro interno ao consultar o status.' });
+    }
+});
+
+
 // --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
@@ -1101,24 +1102,11 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
 
 
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
-async function handleSuccessfulPayment(transaction_id, customerData) {
+async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
-        const [transaction] = await sql`
-            UPDATE pix_transactions 
-            SET status = 'paid', paid_at = NOW() 
-            WHERE (provider_transaction_id = ${transaction_id} OR pix_id = ${transaction_id}) AND status != 'paid' 
-            RETURNING *`;
-            
+        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
         if (!transaction) return;
-
-        // Notificar cliente via WebSocket
-        const wsClient = wsClients.get(transaction.provider_transaction_id);
-        if (wsClient && wsClient.readyState === wsClient.OPEN) {
-            wsClient.send(JSON.stringify({ type: 'payment_confirmed' }));
-            console.log(`Notificação de pagamento enviada via WebSocket para ${transaction.provider_transaction_id}`);
-            wsClient.close();
-        }
 
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
@@ -1140,21 +1128,39 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
-        await handleSuccessfulPayment(id, { name: payer_name, document: payer_document });
+        try {
+            const sql = getDbConnection();
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: payer_name, document: payer_document });
+            }
+        } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
     }
     res.sendStatus(200);
 });
 app.post('/api/webhook/cnpay', async (req, res) => {
     const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
-        await handleSuccessfulPayment(transactionId, { name: customer?.name, document: customer?.taxID?.taxID });
+        try {
+            const sql = getDbConnection();
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
+            }
+        } catch (error) { console.error("Erro no webhook da CNPay:", error); }
     }
     res.sendStatus(200);
 });
 app.post('/api/webhook/oasyfy', async (req, res) => {
     const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
-        await handleSuccessfulPayment(transactionId, { name: customer?.name, document: customer?.taxID?.taxID });
+        try {
+            const sql = getDbConnection();
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
+            }
+        } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
     }
     res.sendStatus(200);
 });
@@ -1280,23 +1286,16 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 }
 
 
-// --- NOVA ROTA PARA CRON JOB DA VERCEL ---
-app.get('/api/cron/check-pending-transactions', async (req, res) => {
-    if (req.query.secret !== CRON_SECRET) {
-        return res.status(401).json({ message: 'Acesso não autorizado.' });
-    }
-
+// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES ---
+async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
         const pendingTransactions = await sql`
-            SELECT id, provider, provider_transaction_id, click_id_internal, status
+            SELECT id, provider, provider_transaction_id, click_id_internal
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '24 hours'`;
 
-        if (pendingTransactions.length === 0) {
-            return res.status(200).json({ message: 'Nenhuma transação pendente encontrada.' });
-        }
+        if (pendingTransactions.length === 0) return;
         
-        let checkedCount = 0;
         for (const tx of pendingTransactions) {
             try {
                 const [seller] = await sql`
@@ -1321,22 +1320,20 @@ app.get('/api/cron/check-pending-transactions', async (req, res) => {
                 }
                 
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
-                     await handleSuccessfulPayment(tx.provider_transaction_id, customerData);
+                     await handleSuccessfulPayment(tx.click_id_internal, customerData);
                 }
-                checkedCount++;
             } catch (error) {
                 console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
             }
         }
-        res.status(200).json({ message: `Verificação concluída. ${checkedCount} transações checadas.` });
     } catch (error) {
-        console.error("Erro na rotina de verificação geral (CRON):", error.message);
-        res.status(500).json({ message: 'Erro interno no processo de verificação.' });
+        console.error("Erro na rotina de verificação geral:", error.message);
     }
-});
-
+}
+setInterval(checkPendingTransactions, 120000);
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
+// ... (Nenhuma alteração aqui, código do admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
@@ -1469,11 +1466,4 @@ app.get('/admin', (req, res) => {
     res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-
-// --- INICIALIZAÇÃO DO SERVIDOR ---
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
-
-module.exports = server;
+module.exports = app;
