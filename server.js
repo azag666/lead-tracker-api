@@ -150,10 +150,6 @@ async function checkAndAwardAchievements(seller_id) {
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
-
-// *** ROTA /api/sellers/send-verification REMOVIDA ***
-
-// *** ROTA DE REGISTRO SIMPLIFICADA ***
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -171,7 +167,6 @@ app.post('/api/sellers/register', async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
         
-        // Query de inserção atualizada para não incluir phone_number
         await sql`INSERT INTO sellers (name, email, password_hash, api_key, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, TRUE)`;
         
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
@@ -1333,7 +1328,6 @@ async function checkPendingTransactions() {
 setInterval(checkPendingTransactions, 120000);
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
-// ... (Nenhuma alteração aqui, código do admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
