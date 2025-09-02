@@ -1108,18 +1108,12 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
 });
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (CORRIGIDA) ---
-async function handleSuccessfulPayment(transactionId, customerData) {
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
+async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
     try {
-        // A query agora usa o ID único da transação para evitar o bug
-        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transactionId} AND status != 'paid' RETURNING *`;
-        
-        // Se a transação não foi encontrada ou já estava paga, a função para aqui.
-        if (!transaction) {
-            console.log(`Transação ${transactionId} não precisou de atualização (já paga ou não encontrada).`);
-            return;
-        }
+        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
+        if (!transaction) return;
 
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
@@ -1133,19 +1127,19 @@ async function handleSuccessfulPayment(transactionId, customerData) {
             await checkAndAwardAchievements(seller.id); 
         }
     } catch(error) {
-        console.error(`Erro ao lidar com pagamento bem-sucedido para transactionId ${transactionId}:`, error);
+        console.error("Erro ao lidar com pagamento bem-sucedido:", error);
     }
 }
 
-// --- WEBHOOKS (CORRIGIDOS) ---
+// --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
         try {
             const sql = getDbConnection();
-            const [tx] = await sql`SELECT id, status FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
             if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.id, { name: payer_name, document: payer_document });
+                await handleSuccessfulPayment(tx.click_id_internal, { name: payer_name, document: payer_document });
             }
         } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
     }
@@ -1156,9 +1150,9 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
-            const [tx] = await sql`SELECT id, status FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
             if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da CNPay:", error); }
     }
@@ -1169,15 +1163,14 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     if (status === 'COMPLETED') {
         try {
             const sql = getDbConnection();
-            const [tx] = await sql`SELECT id, status FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
+                await handleSuccessfulPayment(tx.click_id_internal, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
     }
     res.sendStatus(200);
 });
-
 
 // --- FUNÇÃO DE ENVIO PARA UTIFY ---
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
@@ -1300,12 +1293,12 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 }
 
 
-// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (CORRIGIDA) ---
+// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
         const pendingTransactions = await sql`
-            SELECT id, provider, provider_transaction_id, click_id_internal, status
+            SELECT id, provider, provider_transaction_id, click_id_internal
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '24 hours'`;
 
         if (pendingTransactions.length === 0) return;
@@ -1334,7 +1327,7 @@ async function checkPendingTransactions() {
                 }
                 
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
-                     await handleSuccessfulPayment(tx.id, customerData);
+                     await handleSuccessfulPayment(tx.click_id_internal, customerData);
                 }
             } catch (error) {
                 console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
