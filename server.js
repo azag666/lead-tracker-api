@@ -8,13 +8,13 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-const webpush = require('web-push'); // NOVO: Adicionado para notificações
+const webpush = require('web-push'); // Adicionado para notificações
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- CONFIGURAÇÃO DAS NOTIFICAÇÕES (NOVO) ---
+// --- CONFIGURAÇÃO DAS NOTIFICAÇÕES ---
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     webpush.setVapidDetails(
         process.env.VAPID_SUBJECT,
@@ -22,14 +22,14 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
         process.env.VAPID_PRIVATE_KEY
     );
 }
-let adminSubscription = null; // ATENÇÃO: Em produção, isto deve ser guardado numa base de dados.
+let adminSubscription = null; // Em produção, isto deve ser guardado numa base de dados.
 
 // --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
 function getDbConnection() {
     return neon(process.env.DATABASE_URL);
 }
 
-// ... (O resto do seu código, como PUSHINPAY_SPLIT_ACCOUNT_ID, etc., continua igual)
+// --- CONFIGURAÇÃO ---
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
@@ -156,6 +156,7 @@ async function checkAndAwardAchievements(seller_id) {
     }
 }
 
+
 // --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(click_id_internal, customerData) {
     const sql = getDbConnection();
@@ -163,18 +164,15 @@ async function handleSuccessfulPayment(click_id_internal, customerData) {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
         if (!transaction) return;
 
-        // NOVO: Envia notificação ao admin
-        if (adminSubscription) {
+        // Envia notificação ao admin
+        if (adminSubscription && webpush) {
             const payload = JSON.stringify({
                 title: 'Nova Venda Paga!',
                 body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.`,
             });
             webpush.sendNotification(adminSubscription, payload).catch(error => {
-                console.error('Erro ao enviar notificação:', error);
-                // Se a inscrição for inválida, remove-a
-                if (error.statusCode === 410) {
-                    adminSubscription = null;
-                }
+                console.error('Erro ao enviar notificação:', error.stack);
+                if (error.statusCode === 410) { adminSubscription = null; }
             });
         }
         
@@ -204,13 +202,17 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
-// --- NOVAS ROTAS PARA NOTIFICAÇÕES ---
+// --- ROTAS PARA NOTIFICAÇÕES (CORRIGIDO) ---
 app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
-    res.send(process.env.VAPID_PUBLIC_KEY);
+    if (!process.env.VAPID_PUBLIC_KEY) {
+        return res.status(500).send('VAPID Public Key não configurada no servidor.');
+    }
+    res.type('text/plain').send(process.env.VAPID_PUBLIC_KEY);
 });
 
 app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     adminSubscription = req.body;
+    console.log("Inscrição de admin para notificações recebida e guardada.");
     res.status(201).json({});
 });
 
@@ -334,9 +336,8 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
     }
 });
+
 // ... (O resto do seu código `server.js` continua aqui sem alterações)
-
-
 // --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
@@ -916,11 +917,10 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
         if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
 
-        // NOVO: Notifica o admin sobre PIX gerado
         if (adminSubscription) {
             const payload = JSON.stringify({
                 title: 'PIX Gerado',
-                body: `Um PIX de R$ ${(value_cents / 100).toFixed(2)} foi gerado.`,
+                body: `Um PIX de R$ ${(value_cents / 100).toFixed(2)} foi gerado por ${seller.name}.`,
             });
             webpush.sendNotification(adminSubscription, payload).catch(err => console.error(err));
         }
