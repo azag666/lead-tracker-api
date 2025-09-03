@@ -8,25 +8,33 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-// A dependência do Twilio não é mais necessária
-// const twilio = require('twilio'); 
+const webpush = require('web-push'); // NOVO: Adicionado para notificações
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// --- CONFIGURAÇÃO DAS NOTIFICAÇÕES (NOVO) ---
+if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
+    webpush.setVapidDetails(
+        process.env.VAPID_SUBJECT,
+        process.env.VAPID_PUBLIC_KEY,
+        process.env.VAPID_PRIVATE_KEY
+    );
+}
+let adminSubscription = null; // ATENÇÃO: Em produção, isto deve ser guardado numa base de dados.
 
 // --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
 function getDbConnection() {
     return neon(process.env.DATABASE_URL);
 }
 
-// --- CONFIGURAÇÃO ---
+// ... (O resto do seu código, como PUSHINPAY_SPLIT_ACCOUNT_ID, etc., continua igual)
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// --- CONFIGURAÇÃO TWILIO REMOVIDA ---
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -147,6 +155,186 @@ async function checkAndAwardAchievements(seller_id) {
         console.error("Erro ao verificar e conceder conquistas:", error);
     }
 }
+
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
+async function handleSuccessfulPayment(click_id_internal, customerData) {
+    const sql = getDbConnection();
+    try {
+        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
+        if (!transaction) return;
+
+        // NOVO: Envia notificação ao admin
+        if (adminSubscription) {
+            const payload = JSON.stringify({
+                title: 'Nova Venda Paga!',
+                body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.`,
+            });
+            webpush.sendNotification(adminSubscription, payload).catch(error => {
+                console.error('Erro ao enviar notificação:', error);
+                // Se a inscrição for inválida, remove-a
+                if (error.statusCode === 410) {
+                    adminSubscription = null;
+                }
+            });
+        }
+        
+        const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
+
+        if (click && seller) {
+            const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
+            const productData = { id: "prod_final", name: "Produto Vendido" };
+
+            await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
+            await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
+            await checkAndAwardAchievements(seller.id); 
+        }
+    } catch(error) {
+        console.error("Erro ao lidar com pagamento bem-sucedido:", error);
+    }
+}
+
+
+// --- ROTAS DO PAINEL ADMINISTRATIVO ---
+function authenticateAdmin(req, res, next) {
+    const adminKey = req.headers['x-admin-api-key'];
+    if (!adminKey || adminKey !== ADMIN_API_KEY) {
+        return res.status(403).json({ message: 'Acesso negado. Chave de administrador inválida.' });
+    }
+    next();
+}
+
+// --- NOVAS ROTAS PARA NOTIFICAÇÕES ---
+app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
+    res.send(process.env.VAPID_PUBLIC_KEY);
+});
+
+app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
+    adminSubscription = req.body;
+    res.status(201).json({});
+});
+
+// ... (O resto das suas rotas de admin, sellers, etc., continua igual)
+app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const totalSellers = await sql`SELECT COUNT(*) FROM sellers;`;
+        const paidTransactions = await sql`SELECT COUNT(*) as count, SUM(pix_value) as total_revenue FROM pix_transactions WHERE status = 'paid';`;
+        const total_sellers = parseInt(totalSellers[0].count);
+        const total_paid_transactions = parseInt(paidTransactions[0].count);
+        const total_revenue = parseFloat(paidTransactions[0].total_revenue || 0);
+        const saas_profit = total_revenue * 0.0299;
+        res.json({
+            total_sellers, total_paid_transactions,
+            total_revenue: total_revenue.toFixed(2),
+            saas_profit: saas_profit.toFixed(2)
+        });
+    } catch (error) {
+        console.error("Erro no dashboard admin:", error);
+        res.status(500).json({ message: 'Erro ao buscar dados do dashboard.' });
+    }
+});
+app.get('/api/admin/ranking', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const ranking = await sql`
+            SELECT s.id, s.name, s.email, COUNT(pt.id) AS total_sales, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
+            FROM sellers s LEFT JOIN clicks c ON s.id = c.seller_id
+            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
+            GROUP BY s.id, s.name, s.email ORDER BY total_revenue DESC LIMIT 20;`;
+        res.json(ranking);
+    } catch (error) {
+        console.error("Erro no ranking de sellers:", error);
+        res.status(500).json({ message: 'Erro ao buscar ranking.' });
+    }
+});
+app.get('/api/admin/sellers', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const sellers = await sql`SELECT id, name, email, created_at, is_active FROM sellers ORDER BY created_at DESC;`;
+        res.json(sellers);
+    } catch (error) {
+        res.status(500).json({ message: 'Erro ao listar vendedores.' });
+    }
+});
+app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const { isActive } = req.body;
+    try {
+        await sql`UPDATE sellers SET is_active = ${isActive} WHERE id = ${id};`;
+        res.status(200).json({ message: `Usuário ${isActive ? 'ativado' : 'bloqueado'} com sucesso.` });
+    } catch (error) {
+        res.status(500).json({ message: 'Erro ao alterar status do usuário.' });
+    }
+});
+app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) return res.status(400).json({ message: 'A nova senha deve ter pelo menos 8 caracteres.' });
+    try {
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        await sql`UPDATE sellers SET password_hash = ${hashedPassword} WHERE id = ${id};`;
+        res.status(200).json({ message: 'Senha alterada com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Erro ao alterar senha.' });
+    }
+});
+app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    const { id } = req.params;
+    const { pushinpay_token, cnpay_public_key, cnpay_secret_key } = req.body;
+    try {
+        await sql`
+            UPDATE sellers 
+            SET pushinpay_token = ${pushinpay_token}, cnpay_public_key = ${cnpay_public_key}, cnpay_secret_key = ${cnpay_secret_key}
+            WHERE id = ${id};`;
+        res.status(200).json({ message: 'Credenciais alteradas com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ message: 'Erro ao alterar credenciais.' });
+    }
+});
+app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const page = parseInt(req.query.page || 1);
+        const limit = parseInt(req.query.limit || 20);
+        const offset = (page - 1) * limit;
+        const transactions = await sql`
+            SELECT pt.id, pt.status, pt.pix_value, pt.provider, pt.created_at, s.name as seller_name, s.email as seller_email
+            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            JOIN sellers s ON c.seller_id = s.id ORDER BY pt.created_at DESC
+            LIMIT ${limit} OFFSET ${offset};`;
+         const totalTransactionsResult = await sql`SELECT COUNT(*) FROM pix_transactions;`;
+         const total = parseInt(totalTransactionsResult[0].count);
+        res.json({ transactions, total, page, pages: Math.ceil(total / limit), limit });
+    } catch (error) {
+        console.error("Erro ao buscar transações admin:", error);
+        res.status(500).json({ message: 'Erro ao buscar transações.' });
+    }
+});
+
+app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const usageData = await sql`
+            SELECT
+                s.id, s.name, s.email,
+                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '1 hour') AS requests_last_hour,
+                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '24 hours') AS requests_last_24_hours
+            FROM sellers s
+            LEFT JOIN api_requests ar ON s.id = ar.seller_id
+            GROUP BY s.id, s.name, s.email
+            ORDER BY requests_last_24_hours DESC, requests_last_hour DESC;
+        `;
+        res.json(usageData);
+    } catch (error) {
+        console.error("Erro na análise de uso:", error);
+        res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
+    }
+});
+// ... (O resto do seu código `server.js` continua aqui sem alterações)
 
 
 // --- ROTAS DE AUTENTICAÇÃO ---
@@ -728,10 +916,16 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
         if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
 
-        // ##### INÍCIO DA MODIFICAÇÃO #####
-        // Lida com ambos os formatos: "lead000103" e "/start lead000103"
+        // NOVO: Notifica o admin sobre PIX gerado
+        if (adminSubscription) {
+            const payload = JSON.stringify({
+                title: 'PIX Gerado',
+                body: `Um PIX de R$ ${(value_cents / 100).toFixed(2)} foi gerado.`,
+            });
+            webpush.sendNotification(adminSubscription, payload).catch(err => console.error(err));
+        }
+
         const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
-        // ##### FIM DA MODIFICAÇÃO #####
         
         const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
@@ -1108,29 +1302,6 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
 });
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
-async function handleSuccessfulPayment(click_id_internal, customerData) {
-    const sql = getDbConnection();
-    try {
-        const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE click_id_internal = ${click_id_internal} AND status != 'paid' RETURNING *`;
-        if (!transaction) return;
-
-        const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
-        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
-
-        if (click && seller) {
-            const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
-            const productData = { id: "prod_final", name: "Produto Vendido" };
-
-            await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
-            await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-            await checkAndAwardAchievements(seller.id); 
-        }
-    } catch(error) {
-        console.error("Erro ao lidar com pagamento bem-sucedido:", error);
-    }
-}
-
 // --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
@@ -1338,138 +1509,5 @@ async function checkPendingTransactions() {
     }
 }
 setInterval(checkPendingTransactions, 120000);
-
-// --- ROTAS DO PAINEL ADMINISTRATIVO ---
-function authenticateAdmin(req, res, next) {
-    const adminKey = req.headers['x-admin-api-key'];
-    if (!adminKey || adminKey !== ADMIN_API_KEY) {
-        return res.status(403).json({ message: 'Acesso negado. Chave de administrador inválida.' });
-    }
-    next();
-}
-
-app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const totalSellers = await sql`SELECT COUNT(*) FROM sellers;`;
-        const paidTransactions = await sql`SELECT COUNT(*) as count, SUM(pix_value) as total_revenue FROM pix_transactions WHERE status = 'paid';`;
-        const total_sellers = parseInt(totalSellers[0].count);
-        const total_paid_transactions = parseInt(paidTransactions[0].count);
-        const total_revenue = parseFloat(paidTransactions[0].total_revenue || 0);
-        const saas_profit = total_revenue * 0.0299;
-        res.json({
-            total_sellers, total_paid_transactions,
-            total_revenue: total_revenue.toFixed(2),
-            saas_profit: saas_profit.toFixed(2)
-        });
-    } catch (error) {
-        console.error("Erro no dashboard admin:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados do dashboard.' });
-    }
-});
-app.get('/api/admin/ranking', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const ranking = await sql`
-            SELECT s.id, s.name, s.email, COUNT(pt.id) AS total_sales, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
-            FROM sellers s LEFT JOIN clicks c ON s.id = c.seller_id
-            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal AND pt.status = 'paid'
-            GROUP BY s.id, s.name, s.email ORDER BY total_revenue DESC LIMIT 20;`;
-        res.json(ranking);
-    } catch (error) {
-        console.error("Erro no ranking de sellers:", error);
-        res.status(500).json({ message: 'Erro ao buscar ranking.' });
-    }
-});
-app.get('/api/admin/sellers', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const sellers = await sql`SELECT id, name, email, created_at, is_active FROM sellers ORDER BY created_at DESC;`;
-        res.json(sellers);
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao listar vendedores.' });
-    }
-});
-app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { isActive } = req.body;
-    try {
-        await sql`UPDATE sellers SET is_active = ${isActive} WHERE id = ${id};`;
-        res.status(200).json({ message: `Usuário ${isActive ? 'ativado' : 'bloqueado'} com sucesso.` });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar status do usuário.' });
-    }
-});
-app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { newPassword } = req.body;
-    if (!newPassword || newPassword.length < 8) return res.status(400).json({ message: 'A nova senha deve ter pelo menos 8 caracteres.' });
-    try {
-        const hashedPassword = await bcrypt.hash(newPassword, 10);
-        await sql`UPDATE sellers SET password_hash = ${hashedPassword} WHERE id = ${id};`;
-        res.status(200).json({ message: 'Senha alterada com sucesso.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar senha.' });
-    }
-});
-app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    const { id } = req.params;
-    const { pushinpay_token, cnpay_public_key, cnpay_secret_key } = req.body;
-    try {
-        await sql`
-            UPDATE sellers 
-            SET pushinpay_token = ${pushinpay_token}, cnpay_public_key = ${cnpay_public_key}, cnpay_secret_key = ${cnpay_secret_key}
-            WHERE id = ${id};`;
-        res.status(200).json({ message: 'Credenciais alteradas com sucesso.' });
-    } catch (error) {
-        res.status(500).json({ message: 'Erro ao alterar credenciais.' });
-    }
-});
-app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const page = parseInt(req.query.page || 1);
-        const limit = parseInt(req.query.limit || 20);
-        const offset = (page - 1) * limit;
-        const transactions = await sql`
-            SELECT pt.id, pt.status, pt.pix_value, pt.provider, pt.created_at, s.name as seller_name, s.email as seller_email
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
-            JOIN sellers s ON c.seller_id = s.id ORDER BY pt.created_at DESC
-            LIMIT ${limit} OFFSET ${offset};`;
-         const totalTransactionsResult = await sql`SELECT COUNT(*) FROM pix_transactions;`;
-         const total = parseInt(totalTransactionsResult[0].count);
-        res.json({ transactions, total, page, pages: Math.ceil(total / limit), limit });
-    } catch (error) {
-        console.error("Erro ao buscar transações admin:", error);
-        res.status(500).json({ message: 'Erro ao buscar transações.' });
-    }
-});
-
-app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
-    try {
-        const usageData = await sql`
-            SELECT
-                s.id, s.name, s.email,
-                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '1 hour') AS requests_last_hour,
-                COUNT(ar.id) FILTER (WHERE ar.created_at > NOW() - INTERVAL '24 hours') AS requests_last_24_hours
-            FROM sellers s
-            LEFT JOIN api_requests ar ON s.id = ar.seller_id
-            GROUP BY s.id, s.name, s.email
-            ORDER BY requests_last_24_hours DESC, requests_last_hour DESC;
-        `;
-        res.json(usageData);
-    } catch (error) {
-        console.error("Erro na análise de uso:", error);
-        res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
-    }
-});
-
-app.get('/admin', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
 
 module.exports = app;
