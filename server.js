@@ -973,6 +973,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
 });
 
 // ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX
+// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX (VERSÃO CORRIGIDA E COMPLETA)
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -982,24 +983,62 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
     if (!transaction_id) return res.status(400).json({ message: 'ID da transação é obrigatório.' });
 
     try {
-        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
-        if (sellerResult.length === 0) {
+        const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
+        if (!seller) {
             return res.status(401).json({ message: 'API Key inválida.' });
         }
-        const seller_id = sellerResult[0].id;
-
-        const transactionResult = await sql`
-            SELECT pt.status
+        
+        // 1. Busca a transação no seu banco de dados
+        const [transaction] = await sql`
+            SELECT pt.*
             FROM pix_transactions pt
             JOIN clicks c ON pt.click_id_internal = c.id
             WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id})
-              AND c.seller_id = ${seller_id}`;
+              AND c.seller_id = ${seller.id}`;
 
-        if (transactionResult.length === 0) {
+        if (!transaction) {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
         }
 
-        res.status(200).json({ status: transactionResult[0].status });
+        // 2. Se já está paga no seu banco, retorna imediatamente.
+        if (transaction.status === 'paid') {
+            return res.status(200).json({ status: 'paid' });
+        }
+
+        // 3. Se estiver pendente, FAZ A VERIFICAÇÃO EM TEMPO REAL com o provedor
+        let providerStatus;
+        let customerData = {};
+
+        try {
+            if (transaction.provider === 'pushinpay') {
+                const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+                providerStatus = response.data.status;
+                customerData = { name: response.data.payer_name, document: response.data.payer_document };
+
+            } else if (transaction.provider === 'cnpay') {
+                const response = await axios.get(`https://painel.appcnpay.com/api/v1/gateway/pix/receive/${transaction.provider_transaction_id}`, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
+                providerStatus = response.data.status;
+                customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
+
+            } else if (transaction.provider === 'oasyfy') {
+                 const response = await axios.get(`https://app.oasyfy.com/api/v1/gateway/pix/receive/${transaction.provider_transaction_id}`, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
+                 providerStatus = response.data.status;
+                 customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
+            }
+        } catch (providerError) {
+             console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
+             // Se falhar a comunicação com o provedor, retorna o status pendente do banco
+             return res.status(200).json({ status: 'pending' });
+        }
+
+        // 4. Se a verificação em tempo real retornar "pago", atualiza o banco e dispara os eventos
+        if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
+            await handleSuccessfulPayment(transaction.id, customerData);
+            return res.status(200).json({ status: 'paid' });
+        }
+
+        // 5. Se não, apenas retorna que continua pendente.
+        res.status(200).json({ status: 'pending' });
 
     } catch (error) {
         console.error("Erro ao consultar status da transação:", error);
