@@ -1507,7 +1507,7 @@ async function checkPendingTransactions() {
     try {
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
-            FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '24 hours'`;
+            FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '1 hours'`;
 
         if (pendingTransactions.length === 0) return;
         
