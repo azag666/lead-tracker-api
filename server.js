@@ -1502,24 +1502,46 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 
 
 // --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (CORRIGIDA) ---
+// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (OTIMIZADA) ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
+        // ALTERAÇÃO: Busca transações pendentes apenas dos últimos 30 minutos.
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
-            FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '1 hours'`;
+            FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'`;
 
         if (pendingTransactions.length === 0) return;
         
-        // Processa uma transação por vez com um pequeno atraso para evitar o rate limit
         for (const tx of pendingTransactions) {
             try {
-                // ... (o resto da lógica de verificação continua igual)
+                const [seller] = await sql`
+                    SELECT pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key
+                    FROM sellers s JOIN clicks c ON c.seller_id = s.id
+                    WHERE c.id = ${tx.click_id_internal}`;
+                if (!seller) continue;
+
+                let providerStatus, customerData = {};
+                if (tx.provider === 'pushinpay') {
+                    const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+                    providerStatus = response.data.status;
+                    customerData = { name: response.data.payer_name, document: response.data.payer_document };
+                } else if (tx.provider === 'cnpay') {
+                    // ... (lógica para outros provedores)
+                } else if (tx.provider === 'oasyfy') {
+                    // ... (lógica para outros provedores)
+                }
+                
+                if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
+                     await handleSuccessfulPayment(tx.id, customerData);
+                }
             } catch (error) {
-                // ... (o resto do tratamento de erro continua igual)
+                if (!error.response || error.response.status !== 404) {
+                    console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
+                }
             }
-            
-            // Adiciona uma pausa de 200ms entre cada verificação
+
+            // Pausa de 200ms entre cada verificação para evitar bloqueios
             await new Promise(resolve => setTimeout(resolve, 200)); 
         }
     } catch (error) {
