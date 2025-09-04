@@ -972,7 +972,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 
-// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX
 // ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX (VERSÃO CORRIGIDA E COMPLETA)
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
     const sql = getDbConnection();
@@ -1045,7 +1044,6 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao consultar o status.' });
     }
 });
-
 
 // --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
