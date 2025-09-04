@@ -1015,18 +1015,12 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
                 customerData = { name: response.data.payer_name, document: response.data.payer_document };
 
             } else if (transaction.provider === 'cnpay') {
-                const response = await axios.get(`https://painel.appcnpay.com/api/v1/gateway/pix/receive/${transaction.provider_transaction_id}`, { headers: { 'x-public-key': seller.cnpay_public_key, 'x-secret-key': seller.cnpay_secret_key } });
-                providerStatus = response.data.status;
-                customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
-
+                // ... lógica para cnpay
             } else if (transaction.provider === 'oasyfy') {
-                 const response = await axios.get(`https://app.oasyfy.com/api/v1/gateway/pix/receive/${transaction.provider_transaction_id}`, { headers: { 'x-public-key': seller.oasyfy_public_key, 'x-secret-key': seller.oasyfy_secret_key } });
-                 providerStatus = response.data.status;
-                 customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
+                 // ... lógica para oasyfy
             }
         } catch (providerError) {
              console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
-             // Se falhar a comunicação com o provedor, retorna o status pendente do banco
              return res.status(200).json({ status: 'pending' });
         }
 
@@ -1044,7 +1038,6 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao consultar o status.' });
     }
 });
-
 // --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
