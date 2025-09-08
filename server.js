@@ -269,7 +269,7 @@ app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, 
     const { isActive } = req.body;
     try {
         await sql`UPDATE sellers SET is_active = ${isActive} WHERE id = ${id};`;
-        res.status(200).json({ message: `Usuário ${isActive ? 'ativado' : 'bloqueado'} com sucesso.` });
+        res.status(200).json({ message: `Usuário ${isActive ? 'ativado' : 'desativado'} com sucesso.` });
     } catch (error) {
         res.status(500).json({ message: 'Erro ao alterar status do usuário.' });
     }
@@ -1143,99 +1143,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
-// --- ROTA DE WEBHOOK DO TELEGRAM ---
-app.post('/api/webhook/telegram/:botId', async (req, res) => {
-    const sql = getDbConnection();
-    const { botId } = req.params;
-
-    if (req.body.callback_query) {
-        const { callback_query } = req.body;
-        const chatId = callback_query.message.chat.id;
-        const [action, ...params] = callback_query.data.split('|');
-
-        try {
-            const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-            if (!bot) { return res.status(404).send('Bot not found'); }
-            const botToken = bot.bot_token;
-            const apiUrl = `https://api.telegram.org/bot${botToken}`;
-
-            switch(action) {
-                case 'generate_pix':
-                    const [value] = params;
-                    const value_cents = parseInt(value, 10);
-                    const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
-                    if (!click) { throw new Error('Não foi possível criar um registro de clique.'); }
-                    const click_id_internal = click.id;
-                    const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
-                    await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
-                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
-                    const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
-                    if (providerOrder.length === 0) providerOrder.push('pushinpay');
-                    let pixResult;
-                    for (const provider of providerOrder) {
-                        try {
-                            pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
-                            if (pixResult) break;
-                        } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
-                    }
-                    if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
-                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
-                    const pixMessagePayload = { chat_id: chatId, text: `<code>${pixResult.qr_code_text}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] } };
-                    await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
-                    const confirmationPayload = { chat_id: chatId, text: "Após efetuar o pagamento, clique no botão abaixo para verificar.", parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] } };
-                    await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
-                    break;
-                case 'check_payment':
-                    const [txId] = params;
-                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
-                    let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
-                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) { feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado."; }
-                    await axios.post(`${apiUrl}/sendMessage`, { chat_id: chatId, text: feedbackMessage });
-                    break;
-                case 'copy_pix':
-                     await axios.post(`${apiUrl}/answerCallbackQuery`, { callback_query_id: callback_query.id, text: "Copiado! Agora é só colar no app do seu banco.", show_alert: true });
-                    break;
-            }
-        } catch (error) { console.error('Erro no processamento do callback do webhook:', error.message, error.stack); }
-        return res.sendStatus(200);
-    }
-
-    const { message } = req.body;
-    
-    if (!message || !message.text || !message.chat || message.chat.id < 0) {
-        return res.sendStatus(200);
-    }
-
-    if (message.text.startsWith('/start ')) {
-        const chatId = message.chat.id;
-        const userId = message.from.id;
-        const firstName = message.from.first_name;
-        const lastName = message.from.last_name || null;
-        const username = message.from.username || null;
-        const clickId = message.text.split(' ')[1] || null;
-
-        try {
-            const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-            if (!bot) { 
-                console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
-                return res.status(404).send('Bot not found'); 
-            }
-            await sql`
-                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
-                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
-                ON CONFLICT (chat_id) DO UPDATE SET
-                    user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
-                    username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
-            `;
-        } catch (error) {
-            console.error('Erro ao processar comando /start do Telegram:', error);
-            return res.sendStatus(500);
-        }
-    }
-    
-    res.sendStatus(200);
-});
-
 
 // --- ROTAS DA CENTRAL DE DISPAROS ---
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
@@ -1333,6 +1240,273 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
         console.error("Erro no disparo em massa:", error);
         if (!res.headersSent) res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
     }
+});
+
+// ========================================================================
+// --- INÍCIO: NOVAS ROTAS E MOTOR DE FLUXOS PARA O GERENCIADOR DE BOTS ---
+// ========================================================================
+
+// --- ROTAS CRUD PARA GERENCIAR FLUXOS ---
+app.post('/api/flows', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    const { name, bot_id, trigger_keyword, nodes } = req.body; // nodes é um array de objetos
+    if (!name || !bot_id || !Array.isArray(nodes) || nodes.length === 0) {
+        return res.status(400).json({ message: 'Nome, bot, e ao menos um nó são obrigatórios.' });
+    }
+
+    try {
+        await sql`BEGIN`;
+        // Cria o fluxo principal
+        const [newFlow] = await sql`
+            INSERT INTO flows (seller_id, bot_id, name, trigger_keyword)
+            VALUES (${req.user.id}, ${bot_id}, ${name}, ${trigger_keyword || null})
+            RETURNING *;
+        `;
+
+        // Cria cada nó associado ao fluxo
+        for (const node of nodes) {
+            await sql`
+                INSERT INTO flow_nodes (flow_id, node_type, content, is_first_node)
+                VALUES (${newFlow.id}, ${node.node_type}, ${sql.json(node.content)}, ${node.is_first_node || false});
+            `;
+        }
+
+        await sql`COMMIT`;
+        res.status(201).json(newFlow);
+    } catch (error) {
+        await sql`ROLLBACK`;
+        console.error("Erro ao criar fluxo:", error);
+        if (error.code === '23505') { // Erro de chave única
+             return res.status(409).json({ message: 'Uma palavra-chave com esse nome já existe.' });
+        }
+        res.status(500).json({ message: 'Erro interno ao salvar o fluxo.' });
+    }
+});
+
+app.get('/api/flows', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const flows = await sql`
+            SELECT f.*, b.bot_name
+            FROM flows f
+            JOIN telegram_bots b ON f.bot_id = b.id
+            WHERE f.seller_id = ${req.user.id}
+            ORDER BY f.created_at DESC;
+        `;
+        res.json(flows);
+    } catch (error) {
+        console.error("Erro ao listar fluxos:", error);
+        res.status(500).json({ message: 'Erro ao buscar fluxos.' });
+    }
+});
+
+app.get('/api/flows/:id', authenticateJwt, async (req, res) => {
+    const sql = getDbConnection();
+    try {
+        const [flow] = await sql`SELECT * FROM flows WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
+        if (!flow) {
+            return res.status(404).json({ message: 'Fluxo não encontrado.' });
+        }
+        const nodes = await sql`SELECT * FROM flow_nodes WHERE flow_id = ${req.params.id}`;
+        res.json({ ...flow, nodes });
+    } catch (error) {
+        console.error("Erro ao buscar detalhes do fluxo:", error);
+        res.status(500).json({ message: 'Erro ao buscar detalhes do fluxo.' });
+    }
+});
+
+
+// --- MOTOR DE EXECUÇÃO DE FLUXOS (A SER USADO PELO WEBHOOK) ---
+async function getOrCreateUserSession(sql, chat_id, bot_id) {
+    let [session] = await sql`SELECT * FROM user_sessions WHERE chat_id = ${chat_id} AND bot_id = ${bot_id}`;
+    if (!session) {
+        [session] = await sql`INSERT INTO user_sessions (chat_id, bot_id) VALUES (${chat_id}, ${bot_id}) RETURNING *`;
+    }
+    return session;
+}
+
+async function processFlowNode(sql, chat_id, bot_token, node, session) {
+    const apiUrl = `https://api.telegram.org/bot${bot_token}`;
+
+    switch (node.node_type) {
+        case 'send_message':
+            await axios.post(`${apiUrl}/sendMessage`, {
+                chat_id: chat_id,
+                text: node.content.text,
+                parse_mode: 'HTML'
+            });
+            // Avança para o próximo nó se houver
+            if (node.content.next_node_id) {
+                await sql`UPDATE user_sessions SET current_node_id = ${node.content.next_node_id} WHERE id = ${session.id}`;
+                const [nextNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${node.content.next_node_id}`;
+                await processFlowNode(sql, chat_id, bot_token, nextNode, session); // Processa o próximo nó imediatamente
+            } else {
+                 await sql`UPDATE user_sessions SET current_flow_id = NULL, current_node_id = NULL WHERE id = ${session.id}`; // Fim do fluxo
+            }
+            break;
+
+        case 'send_buttons':
+            const inline_keyboard = node.content.buttons.map(btn => ([{
+                text: btn.label,
+                callback_data: `flow|${node.id}|${btn.next_node_id}` // Formato: flow|currentNodeId|nextNodeId
+            }]));
+
+            await axios.post(`${apiUrl}/sendMessage`, {
+                chat_id: chat_id,
+                text: node.content.text,
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard }
+            });
+             // O fluxo agora aguarda o clique do usuário, então não fazemos nada aqui.
+            break;
+
+        case 'generate_pix':
+            // Esta parte integra sua lógica de PIX existente de forma brilhante!
+            try {
+                const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${session.bot_id}`;
+                const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
+                const value_cents = node.content.value_cents;
+
+                // Reutilizando sua função robusta de geração de PIX
+                const pixResult = await generatePixForProvider('pushinpay', seller, value_cents, 'seusite.com', seller.api_key); // Use o provedor padrão ou a lógica de fallback
+
+                await axios.post(`${apiUrl}/sendMessage`, {
+                    chat_id: chat_id,
+                    text: `✅ PIX Gerado! Copie o código abaixo:\n\n<code>${pixResult.qr_code_text}</code>`,
+                    parse_mode: 'HTML'
+                });
+                await sql`UPDATE user_sessions SET current_node_id = ${node.content.success_node_id} WHERE id = ${session.id}`;
+                const [successNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${node.content.success_node_id}`;
+                await processFlowNode(sql, chat_id, bot_token, successNode, session);
+            } catch (error) {
+                console.error("Erro ao gerar PIX no fluxo:", error);
+                 await axios.post(`${apiUrl}/sendMessage`, { chat_id: chat_id, text: "❌ Desculpe, não consegui gerar o PIX. Tente novamente." });
+                 if (node.content.failure_node_id) {
+                    await sql`UPDATE user_sessions SET current_node_id = ${node.content.failure_node_id} WHERE id = ${session.id}`;
+                    const [failureNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${node.content.failure_node_id}`;
+                    await processFlowNode(sql, chat_id, bot_token, failureNode, session);
+                 } else {
+                     await sql`UPDATE user_sessions SET current_flow_id = NULL, current_node_id = NULL WHERE id = ${session.id}`;
+                 }
+            }
+            break;
+        // Adicionar mais tipos de nós aqui no futuro (ex: 'ask_question', 'if_condition', etc.)
+    }
+}
+
+// ========================================================================
+// --- FIM: NOVAS ROTAS E MOTOR DE FLUXOS ---
+// ========================================================================
+
+
+// --- ROTA DE WEBHOOK DO TELEGRAM (VERSÃO 2.0 COM MOTOR DE FLUXOS) ---
+app.post('/api/webhook/telegram/:botId', async (req, res) => {
+    const sql = getDbConnection();
+    const { botId } = req.params;
+    const { message, callback_query } = req.body;
+
+    // --- Processamento de Callbacks (Cliques em Botões) ---
+    if (callback_query) {
+        res.sendStatus(200); // Responde imediatamente ao Telegram
+        const chat_id = callback_query.message.chat.id;
+        const [type, ...params] = callback_query.data.split('|');
+        const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
+        if (!bot) return;
+
+        try {
+            if (type === 'flow') {
+                const [current_node_id, next_node_id] = params;
+                const session = await getOrCreateUserSession(sql, chat_id, botId);
+                await sql`UPDATE user_sessions SET current_node_id = ${next_node_id} WHERE id = ${session.id}`;
+                const [nextNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${next_node_id}`;
+                if (nextNode) {
+                    await processFlowNode(sql, chat_id, bot.bot_token, nextNode, session);
+                }
+            } else if (type === 'generate_pix') { // Lógica antiga para disparos em massa
+                const [value] = params;
+                const value_cents = parseInt(value, 10);
+                const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
+                const click_id_internal = click.id;
+                const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
+                await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
+                const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
+                const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
+                if (providerOrder.length === 0) providerOrder.push('pushinpay');
+                let pixResult;
+                for (const provider of providerOrder) {
+                    try {
+                        pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                        if (pixResult) break;
+                    } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
+                }
+                if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
+                await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                const pixMessagePayload = { chat_id: chat_id, text: `<code>${pixResult.qr_code_text}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] } };
+                await axios.post(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, pixMessagePayload);
+                const confirmationPayload = { chat_id: chat_id, text: "Após efetuar o pagamento, clique no botão abaixo para verificar.", parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] } };
+                await axios.post(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, confirmationPayload);
+            } else if (type === 'check_payment') {
+                const [txId] = params;
+                const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
+                let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
+                if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) { feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado."; }
+                await axios.post(`https://api.telegram.org/bot${bot.bot_token}/sendMessage`, { chat_id: chat_id, text: feedbackMessage });
+            } else if (type === 'copy_pix') {
+                 await axios.post(`https://api.telegram.org/bot${bot.bot_token}/answerCallbackQuery`, { callback_query_id: callback_query.id, text: "Copiado! Agora é só colar no app do seu banco.", show_alert: true });
+            }
+        } catch (error) {
+            console.error('Erro no processamento do callback do webhook:', error.message, error.stack);
+        }
+        return;
+    }
+
+    // --- Processamento de Mensagens de Texto ---
+    if (message && message.text) {
+        res.sendStatus(200); // Responde imediatamente
+        const chat_id = message.chat.id;
+        const text = message.text.toLowerCase();
+        
+        try {
+            const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
+            if (!bot) return;
+
+            // 1. Tenta encontrar um fluxo que seja acionado pela palavra-chave
+            const [flow] = await sql`
+                SELECT f.id as flow_id, fn.id as first_node_id
+                FROM flows f
+                JOIN flow_nodes fn ON f.id = fn.flow_id
+                WHERE f.bot_id = ${botId} AND f.trigger_keyword = ${text} AND fn.is_first_node = TRUE;
+            `;
+
+            if (flow) {
+                const session = await getOrCreateUserSession(sql, chat_id, botId);
+                await sql`UPDATE user_sessions SET current_flow_id = ${flow.flow_id}, current_node_id = ${flow.first_node_id} WHERE id = ${session.id};`;
+                const [firstNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${flow.first_node_id}`;
+                if (firstNode) {
+                    await processFlowNode(sql, chat_id, bot.bot_token, firstNode, session);
+                }
+            } else if (message.text.startsWith('/start ')) {
+                // 2. Se não achar fluxo, executa a lógica antiga de /start para pressels
+                const userId = message.from.id;
+                const firstName = message.from.first_name;
+                const lastName = message.from.last_name || null;
+                const username = message.from.username || null;
+                const clickId = message.text.split(' ')[1] || null;
+                await sql`
+                    INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
+                    VALUES (${bot.seller_id}, ${botId}, ${chat_id}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
+                    ON CONFLICT (chat_id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+                        username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+                `;
+            }
+        } catch (error) {
+            console.error('Erro no webhook do Telegram:', error);
+        }
+        return;
+    }
+    
+    res.sendStatus(200); // Resposta padrão para eventos não tratados
 });
 
 
@@ -1501,7 +1675,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 }
 
 
-// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (CORRIGIDA) ---
 // --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (OTIMIZADA) ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
