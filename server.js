@@ -838,75 +838,67 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // ** A correção está aqui: Agora os filtros são aplicados de forma segura **
+        // ** Lógica de consulta reescrita para ser mais segura e evitar erros de sintaxe **
 
-        const totalClicksResult = await sql`
-            SELECT COUNT(*) FROM clicks 
-            WHERE seller_id = ${sellerId}
-            ${hasDateFilter ? sql`AND created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-        `;
+        // Queries
+        const totalClicksQuery = hasDateFilter
+            ? sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId}`;
 
-        const pixGeneratedResult = await sql`
-            SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue 
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id 
-            WHERE c.seller_id = ${sellerId}
-            ${hasDateFilter ? sql`AND pt.created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-        `;
+        const pixGeneratedQuery = hasDateFilter
+            ? sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.created_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId}`;
 
-        const pixPaidResult = await sql`
-            SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue 
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id 
-            WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'
-            ${hasDateFilter ? sql`AND pt.paid_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-        `;
+        const pixPaidQuery = hasDateFilter
+            ? sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
 
-        const botsPerformance = await sql`
-            SELECT tb.bot_name, COUNT(c.id) AS total_clicks, 
-                   COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, 
-                   COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue 
-            FROM telegram_bots tb 
-            LEFT JOIN pressels p ON p.bot_id = tb.id 
-            LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} ${hasDateFilter ? sql`AND c.created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id 
-            WHERE tb.seller_id = ${sellerId} 
-            GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC
-        `;
+        const botsPerformanceQuery = hasDateFilter
+            ? sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
+            : sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
 
-        const clicksByState = await sql`
-            SELECT state, COUNT(id) AS total_clicks FROM clicks 
-            WHERE seller_id = ${sellerId} AND state IS NOT NULL AND state != 'Desconhecido'
-            ${hasDateFilter ? sql`AND created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            GROUP BY state ORDER BY total_clicks DESC LIMIT 10
-        `;
+        const clicksByStateQuery = hasDateFilter
+             ? sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
+             : sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
 
-        const dailyRevenue = await sql`
-            SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue 
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id 
-            WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'
-            ${hasDateFilter ? sql`AND pt.paid_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC
-        `;
+        const dailyRevenueQuery = hasDateFilter
+            ? sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`
+            : sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`;
         
-        const trafficSource = await sql`
-            SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks 
-            FROM clicks WHERE seller_id = ${sellerId} 
-            ${hasDateFilter ? sql`AND created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            GROUP BY source ORDER BY clicks DESC
-        `;
+        const trafficSourceQuery = hasDateFilter
+            ? sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY source ORDER BY clicks DESC`
+            : sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY source ORDER BY clicks DESC`;
 
-        const topPlacements = await sql`
-            SELECT utm_term as placement, COUNT(id) as clicks FROM clicks 
-            WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL 
-            ${hasDateFilter ? sql`AND created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            GROUP BY placement ORDER BY clicks DESC LIMIT 10
-        `;
+        const topPlacementsQuery = hasDateFilter
+            ? sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY placement ORDER BY clicks DESC LIMIT 10`
+            : sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL GROUP BY placement ORDER BY clicks DESC LIMIT 10`;
         
-        const deviceOS = await sql`
-            SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks 
-            FROM clicks WHERE seller_id = ${sellerId} 
-            ${hasDateFilter ? sql`AND created_at BETWEEN ${startDate} AND ${endDate}` : sql``}
-            GROUP BY os ORDER BY clicks DESC
-        `;
+        const deviceOSQuery = hasDateFilter
+            ? sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY os ORDER BY clicks DESC`
+            : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
+
+        // Execução de todas as queries em paralelo
+        const [
+            totalClicksResult,
+            pixGeneratedResult,
+            pixPaidResult,
+            botsPerformance,
+            clicksByState,
+            dailyRevenue,
+            trafficSource,
+            topPlacements,
+            deviceOS
+        ] = await Promise.all([
+            totalClicksQuery,
+            pixGeneratedQuery,
+            pixPaidQuery,
+            botsPerformanceQuery,
+            clicksByStateQuery,
+            dailyRevenueQuery,
+            trafficSourceQuery,
+            topPlacementsQuery,
+            deviceOSQuery
+        ]);
 
         const totalClicks = totalClicksResult[0].count;
         const totalPixGenerated = pixGeneratedResult[0].total;
