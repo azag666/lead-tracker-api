@@ -833,27 +833,60 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate;
 
-        const totalClicksResult = hasDateFilter
-            ? await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId}`;
+        // Construção da cláusula WHERE para reutilização
+        const dateFilterClause = hasDateFilter ? sql`AND c.created_at BETWEEN ${startDate} AND ${endDate}` : sql``;
 
-        const totalPixGeneratedResult = hasDateFilter
-            ? await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId}`;
+        const totalClicksResult = await sql`SELECT COUNT(*) FROM clicks c WHERE c.seller_id = ${sellerId} ${dateFilterClause}`;
 
-        const totalPixPaidResult = hasDateFilter
-            ? await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND c.created_at BETWEEN ${startDate} AND ${endDate}`
-            : await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
+        const totalPixGeneratedResult = await sql`SELECT COUNT(pt.id) AS total_pix_generated, COALESCE(SUM(pt.pix_value), 0) AS total_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} ${dateFilterClause}`;
 
-        const botsPerformance = hasDateFilter
-            ? await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
-            : await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
+        const totalPixPaidResult = await sql`SELECT COUNT(pt.id) AS total_pix_paid, COALESCE(SUM(pt.pix_value), 0) AS paid_revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' ${dateFilterClause}`;
 
-        const clicksByState = hasDateFilter
-            ? await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
-            : await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
+        const botsPerformance = await sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} ${dateFilterClause} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
 
-        const dailyRevenue = await sql`SELECT DATE(pt.paid_at) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at) ORDER BY date ASC`;
+        const clicksByState = await sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' ${dateFilterClause} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
+
+        const dailyRevenue = await sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' ${dateFilterClause} GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`;
+
+        // NOVAS QUERIES PARA ANÁLISE DE UTM E USER AGENT
+        const trafficSource = await sql`
+            SELECT 
+                CASE 
+                    WHEN utm_source = 'FB' THEN 'Facebook'
+                    WHEN utm_source = 'ig' THEN 'Instagram'
+                    ELSE 'Outros'
+                END as source,
+                COUNT(id) as clicks
+            FROM clicks c
+            WHERE seller_id = ${sellerId} ${dateFilterClause}
+            GROUP BY source
+            ORDER BY clicks DESC;
+        `;
+
+        const topPlacements = await sql`
+            SELECT 
+                utm_term as placement,
+                COUNT(id) as clicks
+            FROM clicks c
+            WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL ${dateFilterClause}
+            GROUP BY placement
+            ORDER BY clicks DESC
+            LIMIT 10;
+        `;
+        
+        const deviceOS = await sql`
+            SELECT 
+                CASE 
+                    WHEN user_agent ILIKE '%Android%' THEN 'Android'
+                    WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS'
+                    ELSE 'Outros'
+                END as os,
+                COUNT(id) as clicks
+            FROM clicks c
+            WHERE seller_id = ${sellerId} ${dateFilterClause}
+            GROUP BY os
+            ORDER BY clicks DESC;
+        `;
 
         const totalClicks = totalClicksResult[0].count;
         const totalPixGenerated = totalPixGeneratedResult[0].total_pix_generated;
@@ -871,14 +904,17 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             paid_revenue: parseFloat(paidRevenue),
             bots_performance: botsPerformance.map(b => ({ ...b, total_clicks: parseInt(b.total_clicks), total_pix_paid: parseInt(b.total_pix_paid), paid_revenue: parseFloat(b.paid_revenue) })),
             clicks_by_state: clicksByState.map(s => ({ ...s, total_clicks: parseInt(s.total_clicks) })),
-            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) }))
+            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) })),
+            // NOVOS DADOS NA RESPOSTA
+            traffic_source: trafficSource.map(s => ({ ...s, clicks: parseInt(s.clicks) })),
+            top_placements: topPlacements.map(p => ({ ...p, clicks: parseInt(p.clicks) })),
+            device_os: deviceOS.map(d => ({ ...d, clicks: parseInt(d.clicks) }))
         });
     } catch (error) {
         console.error("Erro ao buscar métricas do dashboard:", error);
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
