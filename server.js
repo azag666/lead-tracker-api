@@ -220,7 +220,6 @@ app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     res.status(201).json({});
 });
 
-// ... (O resto das suas rotas de admin, sellers, etc., continua igual)
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -341,7 +340,6 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     }
 });
 
-// ... (O resto do seu código `server.js` continua aqui sem alterações)
 // --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
@@ -809,10 +807,7 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
         const seller_id = sellerResult[0].id;
         const seller_email = sellerResult[0].email;
         
-        // ##### INÍCIO DA MODIFICAÇÃO #####
-        // Lida com ambos os formatos: "lead000103" e "/start lead000103"
         const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
-        // ##### FIM DA MODIFICAÇÃO #####
         
         const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
         
@@ -987,7 +982,6 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
             return res.status(401).json({ message: 'API Key inválida.' });
         }
         
-        // 1. Busca a transação no seu banco de dados
         const [transaction] = await sql`
             SELECT pt.*
             FROM pix_transactions pt
@@ -999,12 +993,10 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
         }
 
-        // 2. Se já está paga no seu banco, retorna imediatamente.
         if (transaction.status === 'paid') {
             return res.status(200).json({ status: 'paid' });
         }
 
-        // 3. Se estiver pendente, FAZ A VERIFICAÇÃO EM TEMPO REAL com o provedor
         let providerStatus;
         let customerData = {};
 
@@ -1024,13 +1016,11 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
              return res.status(200).json({ status: 'pending' });
         }
 
-        // 4. Se a verificação em tempo real retornar "pago", atualiza o banco e dispara os eventos
         if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
             await handleSuccessfulPayment(transaction.id, customerData);
             return res.status(200).json({ status: 'paid' });
         }
 
-        // 5. Se não, apenas retorna que continua pendente.
         res.status(200).json({ status: 'pending' });
 
     } catch (error) {
@@ -1256,18 +1246,17 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
 
     try {
         await sql`BEGIN`;
-        // Cria o fluxo principal
         const [newFlow] = await sql`
             INSERT INTO flows (seller_id, bot_id, name, trigger_keyword)
             VALUES (${req.user.id}, ${bot_id}, ${name}, ${trigger_keyword || null})
             RETURNING *;
         `;
 
-        // Cria cada nó associado ao fluxo
         for (const node of nodes) {
+            // CORREÇÃO APLICADA AQUI:
             await sql`
                 INSERT INTO flow_nodes (flow_id, node_type, content, is_first_node)
-                VALUES (${newFlow.id}, ${node.node_type}, ${sql.json(node.content)}, ${node.is_first_node || false});
+                VALUES (${newFlow.id}, ${node.node_type}, ${node.content}, ${node.is_first_node || false});
             `;
         }
 
@@ -1276,7 +1265,7 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
     } catch (error) {
         await sql`ROLLBACK`;
         console.error("Erro ao criar fluxo:", error);
-        if (error.code === '23505') { // Erro de chave única
+        if (error.code === '23505') {
              return res.status(409).json({ message: 'Uma palavra-chave com esse nome já existe.' });
         }
         res.status(500).json({ message: 'Erro interno ao salvar o fluxo.' });
@@ -1335,20 +1324,19 @@ async function processFlowNode(sql, chat_id, bot_token, node, session) {
                 text: node.content.text,
                 parse_mode: 'HTML'
             });
-            // Avança para o próximo nó se houver
             if (node.content.next_node_id) {
                 await sql`UPDATE user_sessions SET current_node_id = ${node.content.next_node_id} WHERE id = ${session.id}`;
                 const [nextNode] = await sql`SELECT * FROM flow_nodes WHERE id = ${node.content.next_node_id}`;
-                await processFlowNode(sql, chat_id, bot_token, nextNode, session); // Processa o próximo nó imediatamente
+                await processFlowNode(sql, chat_id, bot_token, nextNode, session);
             } else {
-                 await sql`UPDATE user_sessions SET current_flow_id = NULL, current_node_id = NULL WHERE id = ${session.id}`; // Fim do fluxo
+                 await sql`UPDATE user_sessions SET current_flow_id = NULL, current_node_id = NULL WHERE id = ${session.id}`;
             }
             break;
 
         case 'send_buttons':
             const inline_keyboard = node.content.buttons.map(btn => ([{
                 text: btn.label,
-                callback_data: `flow|${node.id}|${btn.next_node_id}` // Formato: flow|currentNodeId|nextNodeId
+                callback_data: `flow|${node.id}|${btn.next_node_id}`
             }]));
 
             await axios.post(`${apiUrl}/sendMessage`, {
@@ -1357,18 +1345,15 @@ async function processFlowNode(sql, chat_id, bot_token, node, session) {
                 parse_mode: 'HTML',
                 reply_markup: { inline_keyboard }
             });
-             // O fluxo agora aguarda o clique do usuário, então não fazemos nada aqui.
             break;
 
         case 'generate_pix':
-            // Esta parte integra sua lógica de PIX existente de forma brilhante!
             try {
                 const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${session.bot_id}`;
                 const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
                 const value_cents = node.content.value_cents;
 
-                // Reutilizando sua função robusta de geração de PIX
-                const pixResult = await generatePixForProvider('pushinpay', seller, value_cents, 'seusite.com', seller.api_key); // Use o provedor padrão ou a lógica de fallback
+                const pixResult = await generatePixForProvider('pushinpay', seller, value_cents, 'seusite.com', seller.api_key);
 
                 await axios.post(`${apiUrl}/sendMessage`, {
                     chat_id: chat_id,
@@ -1390,7 +1375,6 @@ async function processFlowNode(sql, chat_id, bot_token, node, session) {
                  }
             }
             break;
-        // Adicionar mais tipos de nós aqui no futuro (ex: 'ask_question', 'if_condition', etc.)
     }
 }
 
@@ -1405,9 +1389,8 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
     const { message, callback_query } = req.body;
 
-    // --- Processamento de Callbacks (Cliques em Botões) ---
     if (callback_query) {
-        res.sendStatus(200); // Responde imediatamente ao Telegram
+        res.sendStatus(200);
         const chat_id = callback_query.message.chat.id;
         const [type, ...params] = callback_query.data.split('|');
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
@@ -1422,7 +1405,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                 if (nextNode) {
                     await processFlowNode(sql, chat_id, bot.bot_token, nextNode, session);
                 }
-            } else if (type === 'generate_pix') { // Lógica antiga para disparos em massa
+            } else if (type === 'generate_pix') {
                 const [value] = params;
                 const value_cents = parseInt(value, 10);
                 const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
@@ -1460,9 +1443,8 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         return;
     }
 
-    // --- Processamento de Mensagens de Texto ---
     if (message && message.text) {
-        res.sendStatus(200); // Responde imediatamente
+        res.sendStatus(200);
         const chat_id = message.chat.id;
         const text = message.text.toLowerCase();
         
@@ -1470,7 +1452,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
             const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
             if (!bot) return;
 
-            // 1. Tenta encontrar um fluxo que seja acionado pela palavra-chave
             const [flow] = await sql`
                 SELECT f.id as flow_id, fn.id as first_node_id
                 FROM flows f
@@ -1486,7 +1467,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                     await processFlowNode(sql, chat_id, bot.bot_token, firstNode, session);
                 }
             } else if (message.text.startsWith('/start ')) {
-                // 2. Se não achar fluxo, executa a lógica antiga de /start para pressels
                 const userId = message.from.id;
                 const firstName = message.from.first_name;
                 const lastName = message.from.last_name || null;
@@ -1506,11 +1486,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         return;
     }
     
-    res.sendStatus(200); // Resposta padrão para eventos não tratados
+    res.sendStatus(200);
 });
 
 
-// --- WEBHOOKS (CORRIGIDOS) ---
+// --- WEBHOOKS ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
@@ -1518,7 +1498,6 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: payer_name, document: payer_document });
             }
         } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
@@ -1532,7 +1511,6 @@ app.post('/api/webhook/cnpay', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da CNPay:", error); }
@@ -1546,7 +1524,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
@@ -1679,7 +1656,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
-        // ALTERAÇÃO: Busca transações pendentes apenas dos últimos 30 minutos.
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'`;
@@ -1700,9 +1676,9 @@ async function checkPendingTransactions() {
                     providerStatus = response.data.status;
                     customerData = { name: response.data.payer_name, document: response.data.payer_document };
                 } else if (tx.provider === 'cnpay') {
-                    // ... (lógica para outros provedores)
+                    // Lógica futura para consultar CNPay
                 } else if (tx.provider === 'oasyfy') {
-                    // ... (lógica para outros provedores)
+                    // Lógica futura para consultar Oasyfy
                 }
                 
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
@@ -1713,14 +1689,12 @@ async function checkPendingTransactions() {
                     console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
                 }
             }
-
-            // Pausa de 200ms entre cada verificação para evitar bloqueios
             await new Promise(resolve => setTimeout(resolve, 200)); 
         }
     } catch (error) {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
-setInterval(checkPendingTransactions, 30000); // Mantenha o intervalo de 30 segundos
+setInterval(checkPendingTransactions, 30000);
 
 module.exports = app;
