@@ -206,23 +206,29 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
-// --- INÍCIO DA NOVA FUNCIONALIDADE ---
+// --- INÍCIO DA CORREÇÃO ---
 
-// Função auxiliar para reenviar um evento histórico específico para um Pixel de destino.
 async function sendHistoricalMetaEvent(eventName, clickData, transactionData, targetPixel) {
-    // Esta função é uma adaptação da sua `sendMetaEvent`, mas direcionada para um único pixel
-    // e com o cuidado de usar a data/hora original do evento.
     try {
-        const userData = {
-            client_ip_address: clickData.ip_address,
-            client_user_agent: clickData.user_agent,
-            fbp: clickData.fbp || undefined,
-            fbc: clickData.fbc || undefined,
-            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
-        };
+        const userData = {};
 
-        // Adiciona dados do cliente se existirem (exemplo, você pode buscar do seu DB se tiver)
-        // Por agora, vamos focar nos dados já disponíveis no clique.
+        // Adiciona dados apenas se eles existirem e forem válidos
+        if (clickData.ip_address) {
+            userData.client_ip_address = clickData.ip_address;
+        }
+        if (clickData.user_agent) {
+            userData.client_user_agent = clickData.user_agent;
+        }
+        if (clickData.fbp) {
+            userData.fbp = clickData.fbp;
+        }
+        if (clickData.fbc) {
+            userData.fbc = clickData.fbc;
+        }
+        if (clickData.click_id) {
+            userData.external_id = clickData.click_id.replace('/start ', '');
+        }
+
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
         if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
@@ -232,9 +238,8 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
         
         const { pixelId, accessToken } = targetPixel;
         
-        // ** PONTO CRÍTICO: Usar a data original do pagamento como event_time **
         const event_time = Math.floor(new Date(transactionData.paid_at).getTime() / 1000);
-        const event_id = `${eventName}.${transactionData.id}.${pixelId}`; // ID de evento único para deduplicação
+        const event_id = `${eventName}.${transactionData.id}.${pixelId}`;
 
         const payload = {
             data: [{
@@ -242,23 +247,32 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
                 event_time: event_time,
                 event_id,
                 user_data: userData,
-                action_source: 'other', // Informa à Meta que é um evento de servidor
+                action_source: 'other',
                 custom_data: {
                     currency: 'BRL',
-                    value: transactionData.pix_value
+                    value: parseFloat(transactionData.pix_value)
                 },
             }]
         };
+        
+        // Se o objeto userData estiver vazio, a Meta pode reclamar. É essencial ter pelo menos IP ou User Agent.
+        // Se ambos faltarem, o evento provavelmente falhará, o que é esperado para cliques muito antigos/incompletos.
+        if (Object.keys(userData).length === 0) {
+             console.warn(`[SKIP] Pulando transação ${transactionData.id} por falta de dados de usuário (IP/UserAgent).`);
+             return { success: false, error: 'Dados de usuário insuficientes.' };
+        }
 
         await axios.post(`https://graph.facebook.com/v19.0/${pixelId}/events`, payload, { params: { access_token: accessToken } });
-        // console.log(`Evento histórico '${eventName}' (Transação ID: ${transactionData.id}) reenviado para o Pixel ID ${pixelId}.`);
         return { success: true };
 
     } catch (error) {
-        console.error(`Erro ao reenviar evento histórico para a Meta (Transação ID: ${transactionData.id}):`, error.response?.data?.error?.message || error.message);
-        return { success: false, error: error.response?.data?.error?.message || error.message };
+        // Log aprimorado para mostrar a mensagem específica da Meta
+        const metaError = error.response?.data?.error?.message || error.message;
+        console.error(`Erro ao reenviar evento histórico para a Meta (Transação ID: ${transactionData.id}):`, metaError);
+        return { success: false, error: metaError };
     }
 }
+// --- FIM DA CORREÇÃO ---
 
 
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
@@ -273,8 +287,6 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
     }
 
     try {
-        // Busca todas as transações pagas, juntando com os dados do clique necessário para o evento.
-        // O filtro por seller_id é opcional. Se não for fornecido, reenviará de todos.
         let query;
         if (seller_id) {
             query = sql`
@@ -300,12 +312,10 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             return res.status(404).json({ message: 'Nenhuma transação paga encontrada para os filtros fornecidos.' });
         }
 
-        // Responde imediatamente para o cliente não ficar esperando (timeout)
         res.status(202).json({ 
             message: `Processo iniciado. ${paidTransactions.length} eventos de Purchase serão reenviados para o Pixel ${target_pixel_id}. Isso pode levar vários minutos.` 
         });
 
-        // Executa o envio em segundo plano
         (async () => {
             let successCount = 0;
             let failureCount = 0;
@@ -314,19 +324,16 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             console.log(`[ADMIN] Iniciando reenvio de ${paidTransactions.length} eventos...`);
 
             for (const transaction of paidTransactions) {
-                // Os dados do clique estão agora no mesmo objeto da transação
                 const result = await sendHistoricalMetaEvent('Purchase', transaction, transaction, targetPixel);
                 if (result.success) {
                     successCount++;
                 } else {
                     failureCount++;
                 }
-                // Pausa para não sobrecarregar a API da Meta
                 await new Promise(resolve => setTimeout(resolve, 200)); 
             }
             
             console.log(`[ADMIN] Reenvio concluído. Sucessos: ${successCount}, Falhas: ${failureCount}.`);
-            // Aqui você poderia enviar uma notificação final, e.g., via webhook ou email, se quisesse.
         })();
 
     } catch (error) {
@@ -336,8 +343,6 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
         }
     }
 });
-
-// --- FIM DA NOVA FUNCIONALIDADE ---
 
 
 // --- ROTAS PARA NOTIFICAÇÕES (CORRIGIDO) ---
