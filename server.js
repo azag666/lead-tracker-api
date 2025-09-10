@@ -934,8 +934,13 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
-        const { startDate, endDate } = req.query;
+        let { startDate, endDate } = req.query; // <-- Mude de const para let
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
+
+        // ADICIONE ESTA LINHA: Garante que a data final inclua o dia inteiro
+        if (hasDateFilter) {
+            endDate = `${endDate} 23:59:59`;
+        }
 
         const totalClicksQuery = hasDateFilter
             ? sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate}`
