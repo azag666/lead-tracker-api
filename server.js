@@ -958,8 +958,8 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
              : sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
 
         const dailyRevenueQuery = hasDateFilter
-             ? sql`SELECT DATE(pt.paid_at AT TIME ZONE 'America/Sao_Paulo') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY DATE(pt.paid_at AT TIME ZONE 'America/Sao_Paulo') ORDER BY date ASC`
-             : sql`SELECT DATE(pt.paid_at AT TIME ZONE 'America/Sao_Paulo') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE 'America/Sao_Paulo') ORDER BY date ASC`;LECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`;
+            ? sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`
+            : sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`;
         
         const trafficSourceQuery = hasDateFilter
             ? sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY source ORDER BY clicks DESC`
@@ -973,13 +973,13 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             ? sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY os ORDER BY clicks DESC`
             : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
 
-         const [
-             totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
-             clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
-          ] = await Promise.all([
-              totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery, // <--- CORREÇÃO APLICADA
-              clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
-              deviceOSQuery
+        const [
+            totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
+            clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
+        ] = await Promise.all([
+            totalClicksQuery, pixGeneratedResult, pixPaidQuery, botsPerformanceQuery,
+            clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
+            deviceOSQuery
         ]);
 
         const totalClicks = totalClicksResult[0].count;
