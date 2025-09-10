@@ -974,13 +974,13 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
 
         const [
-            totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
-            clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
-        ] = await Promise.all([
-            totalClicksQuery, pixGeneratedResult, pixPaidQuery, botsPerformanceQuery,
-            clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
-            deviceOSQuery
-        ]);
+               totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
+               clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
+    ] = await Promise.all([
+              totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery, // <--- CORREÇÃO APLICADA
+              clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
+              deviceOSQuery
+   ]);
 
         const totalClicks = totalClicksResult[0].count;
         const totalPixGenerated = pixGeneratedResult[0].total;
