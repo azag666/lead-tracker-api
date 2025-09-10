@@ -206,6 +206,140 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
+// --- INÍCIO DA NOVA FUNCIONALIDADE ---
+
+// Função auxiliar para reenviar um evento histórico específico para um Pixel de destino.
+async function sendHistoricalMetaEvent(eventName, clickData, transactionData, targetPixel) {
+    // Esta função é uma adaptação da sua `sendMetaEvent`, mas direcionada para um único pixel
+    // e com o cuidado de usar a data/hora original do evento.
+    try {
+        const userData = {
+            client_ip_address: clickData.ip_address,
+            client_user_agent: clickData.user_agent,
+            fbp: clickData.fbp || undefined,
+            fbc: clickData.fbc || undefined,
+            external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
+        };
+
+        // Adiciona dados do cliente se existirem (exemplo, você pode buscar do seu DB se tiver)
+        // Por agora, vamos focar nos dados já disponíveis no clique.
+        const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
+        const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
+        if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
+        if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
+
+        Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
+        
+        const { pixelId, accessToken } = targetPixel;
+        
+        // ** PONTO CRÍTICO: Usar a data original do pagamento como event_time **
+        const event_time = Math.floor(new Date(transactionData.paid_at).getTime() / 1000);
+        const event_id = `${eventName}.${transactionData.id}.${pixelId}`; // ID de evento único para deduplicação
+
+        const payload = {
+            data: [{
+                event_name: eventName,
+                event_time: event_time,
+                event_id,
+                user_data: userData,
+                action_source: 'other', // Informa à Meta que é um evento de servidor
+                custom_data: {
+                    currency: 'BRL',
+                    value: transactionData.pix_value
+                },
+            }]
+        };
+
+        await axios.post(`https://graph.facebook.com/v19.0/${pixelId}/events`, payload, { params: { access_token: accessToken } });
+        // console.log(`Evento histórico '${eventName}' (Transação ID: ${transactionData.id}) reenviado para o Pixel ID ${pixelId}.`);
+        return { success: true };
+
+    } catch (error) {
+        console.error(`Erro ao reenviar evento histórico para a Meta (Transação ID: ${transactionData.id}):`, error.response?.data?.error?.message || error.message);
+        return { success: false, error: error.response?.data?.error?.message || error.message };
+    }
+}
+
+
+app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
+    const sql = getDbConnection();
+    const { target_pixel_id, target_meta_api_token, seller_id, start_date, end_date } = req.body;
+
+    if (!target_pixel_id || !target_meta_api_token) {
+        return res.status(400).json({ message: '`target_pixel_id` e `target_meta_api_token` são obrigatórios.' });
+    }
+    if (!start_date || !end_date) {
+        return res.status(400).json({ message: '`start_date` e `end_date` (formato YYYY-MM-DD) são obrigatórios.' });
+    }
+
+    try {
+        // Busca todas as transações pagas, juntando com os dados do clique necessário para o evento.
+        // O filtro por seller_id é opcional. Se não for fornecido, reenviará de todos.
+        let query;
+        if (seller_id) {
+            query = sql`
+                SELECT pt.*, c.ip_address, c.user_agent, c.fbp, c.fbc, c.click_id, c.city, c.state
+                FROM pix_transactions pt
+                JOIN clicks c ON pt.click_id_internal = c.id
+                WHERE pt.status = 'paid' AND c.seller_id = ${seller_id} AND pt.paid_at BETWEEN ${start_date} AND ${end_date}
+                ORDER BY pt.paid_at ASC;
+            `;
+        } else {
+             query = sql`
+                SELECT pt.*, c.ip_address, c.user_agent, c.fbp, c.fbc, c.click_id, c.city, c.state
+                FROM pix_transactions pt
+                JOIN clicks c ON pt.click_id_internal = c.id
+                WHERE pt.status = 'paid' AND pt.paid_at BETWEEN ${start_date} AND ${end_date}
+                ORDER BY pt.paid_at ASC;
+            `;
+        }
+        
+        const paidTransactions = await query;
+        
+        if (paidTransactions.length === 0) {
+            return res.status(404).json({ message: 'Nenhuma transação paga encontrada para os filtros fornecidos.' });
+        }
+
+        // Responde imediatamente para o cliente não ficar esperando (timeout)
+        res.status(202).json({ 
+            message: `Processo iniciado. ${paidTransactions.length} eventos de Purchase serão reenviados para o Pixel ${target_pixel_id}. Isso pode levar vários minutos.` 
+        });
+
+        // Executa o envio em segundo plano
+        (async () => {
+            let successCount = 0;
+            let failureCount = 0;
+            const targetPixel = { pixelId: target_pixel_id, accessToken: target_meta_api_token };
+
+            console.log(`[ADMIN] Iniciando reenvio de ${paidTransactions.length} eventos...`);
+
+            for (const transaction of paidTransactions) {
+                // Os dados do clique estão agora no mesmo objeto da transação
+                const result = await sendHistoricalMetaEvent('Purchase', transaction, transaction, targetPixel);
+                if (result.success) {
+                    successCount++;
+                } else {
+                    failureCount++;
+                }
+                // Pausa para não sobrecarregar a API da Meta
+                await new Promise(resolve => setTimeout(resolve, 200)); 
+            }
+            
+            console.log(`[ADMIN] Reenvio concluído. Sucessos: ${successCount}, Falhas: ${failureCount}.`);
+            // Aqui você poderia enviar uma notificação final, e.g., via webhook ou email, se quisesse.
+        })();
+
+    } catch (error) {
+        console.error("Erro geral na rota de reenviar eventos:", error);
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Erro interno do servidor ao iniciar o processo de reenvio.' });
+        }
+    }
+});
+
+// --- FIM DA NOVA FUNCIONALIDADE ---
+
+
 // --- ROTAS PARA NOTIFICAÇÕES (CORRIGIDO) ---
 app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
     if (!process.env.VAPID_PUBLIC_KEY) {
@@ -213,6 +347,10 @@ app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
     }
     res.type('text/plain').send(process.env.VAPID_PUBLIC_KEY);
 });
+
+// ... (O resto do seu código `server.js` continua aqui sem alterações)
+// ... (COLE O RESTANTE DO SEU CÓDIGO A PARTIR DAQUI)
+// ...
 
 app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     adminSubscription = req.body;
