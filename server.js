@@ -157,7 +157,7 @@ async function checkAndAwardAchievements(seller_id) {
 }
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (CORRIGIDA) ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (COM TRATAMENTO DE ERRO DE NOTIFICAÇÃO) ---
 async function handleSuccessfulPayment(transaction_id, customerData) {
     const sql = getDbConnection();
     try {
@@ -170,8 +170,12 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
                 body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.`,
             });
             webpush.sendNotification(adminSubscription, payload).catch(error => {
-                console.error('Erro ao enviar notificação:', error.stack);
-                if (error.statusCode === 410) { adminSubscription = null; }
+                if (error.statusCode === 410) {
+                    console.log("Inscrição de notificação expirada. Removendo.");
+                    adminSubscription = null;
+                } else {
+                    console.warn("Falha ao enviar notificação push (não-crítico):", error.message);
+                }
             });
         }
         
@@ -202,37 +206,18 @@ function authenticateAdmin(req, res, next) {
 }
 
 
-// --- INÍCIO DA NOVA FUNCIONALIDADE E BOAS PRÁTICAS ---
-
-/**
- * Função aprimorada para enviar eventos históricos para a API da Meta.
- * Inclui mais dados do usuário para melhorar a Qualidade de Correspondência (Event Match Quality).
- * @param {string} eventName - Nome do evento (ex: 'Purchase').
- * @param {object} clickData - Dados do clique e do usuário (enriquecido).
- * @param {object} transactionData - Dados da transação.
- * @param {object} targetPixel - Objeto com { pixelId, accessToken }.
- * @returns {object} - Objeto com o resultado do envio.
- */
+// --- FUNCIONALIDADE DE REENVIO DE EVENTOS (PIXEL WARMING) ---
 async function sendHistoricalMetaEvent(eventName, clickData, transactionData, targetPixel) {
-    let payload_sent = null; // Guardará o payload para feedback
+    let payload_sent = null;
     try {
         const userData = {};
-
-        // Dados do Navegador (Obrigatórios se disponíveis)
         if (clickData.ip_address) userData.client_ip_address = clickData.ip_address;
         if (clickData.user_agent) userData.client_user_agent = clickData.user_agent;
         if (clickData.fbp) userData.fbp = clickData.fbp;
         if (clickData.fbc) userData.fbc = clickData.fbc;
-
-        // Dados Pessoais (Melhoram muito a correspondência)
-        if (clickData.firstName) {
-            userData.fn = crypto.createHash('sha256').update(clickData.firstName.toLowerCase()).digest('hex');
-        }
-        if (clickData.lastName) {
-            userData.ln = crypto.createHash('sha256').update(clickData.lastName.toLowerCase()).digest('hex');
-        }
+        if (clickData.firstName) userData.fn = crypto.createHash('sha256').update(clickData.firstName.toLowerCase()).digest('hex');
+        if (clickData.lastName) userData.ln = crypto.createHash('sha256').update(clickData.lastName.toLowerCase()).digest('hex');
         
-        // Dados de Localização
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
         if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
@@ -257,7 +242,7 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
                 },
             }]
         };
-        payload_sent = payload; // Guarda o payload antes de enviar
+        payload_sent = payload;
 
         if (Object.keys(userData).length === 0) {
             throw new Error('Dados de usuário insuficientes para envio (IP/UserAgent faltando).');
@@ -276,28 +261,32 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
 
 
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
-    console.log(`[ADMIN] Requisição recebida em /api/admin/resend-events.`);
     const sql = getDbConnection();
-    const { target_pixel_id, target_meta_api_token, seller_id, start_date, end_date } = req.body;
+    const { 
+        target_pixel_id, target_meta_api_token, seller_id, 
+        start_date, end_date, page = 1, limit = 50 // Adiciona paginação
+    } = req.body;
 
     if (!target_pixel_id || !target_meta_api_token || !start_date || !end_date) {
         return res.status(400).json({ message: 'Todos os campos obrigatórios devem ser preenchidos.' });
     }
 
     try {
-        // 1. Busca as transações pagas com os dados de clique
         const query = seller_id
             ? sql`SELECT pt.*, c.click_id, c.ip_address, c.user_agent, c.fbp, c.fbc, c.city, c.state FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE pt.status = 'paid' AND c.seller_id = ${seller_id} AND pt.paid_at BETWEEN ${start_date} AND ${end_date} ORDER BY pt.paid_at ASC`
             : sql`SELECT pt.*, c.click_id, c.ip_address, c.user_agent, c.fbp, c.fbc, c.city, c.state FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE pt.status = 'paid' AND pt.paid_at BETWEEN ${start_date} AND ${end_date} ORDER BY pt.paid_at ASC`;
         
-        const paidTransactions = await query;
+        const allPaidTransactions = await query;
         
-        if (paidTransactions.length === 0) {
-            return res.status(404).json({ message: 'Nenhuma transação paga encontrada para os filtros fornecidos.' });
+        if (allPaidTransactions.length === 0) {
+            return res.status(200).json({ 
+                total_events: 0, 
+                total_pages: 0, 
+                message: 'Nenhuma transação paga encontrada para os filtros fornecidos.' 
+            });
         }
 
-        // 2. Busca dados dos usuários do Telegram para enriquecer os eventos
-        const clickIds = paidTransactions.map(t => t.click_id).filter(Boolean);
+        const clickIds = allPaidTransactions.map(t => t.click_id).filter(Boolean);
         let userDataMap = new Map();
         if (clickIds.length > 0) {
             const telegramUsers = await sql`
@@ -306,25 +295,25 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
                 WHERE click_id = ANY(${clickIds})
             `;
             telegramUsers.forEach(user => {
-                // O click_id no telegram_chats não tem o '/start ', então normalizamos
                 const cleanClickId = user.click_id.startsWith('/start ') ? user.click_id : `/start ${user.click_id}`;
                 userDataMap.set(cleanClickId, { firstName: user.first_name, lastName: user.last_name });
             });
         }
+
+        // Paginação do lote
+        const totalEvents = allPaidTransactions.length;
+        const totalPages = Math.ceil(totalEvents / limit);
+        const offset = (page - 1) * limit;
+        const batch = allPaidTransactions.slice(offset, offset + limit);
         
-        // 3. Processa um lote de teste (os 5 primeiros)
-        const batchSize = 5;
-        const batch = paidTransactions.slice(0, batchSize);
         const detailedResults = [];
         const targetPixel = { pixelId: target_pixel_id, accessToken: target_meta_api_token };
 
-        console.log(`[ADMIN] Total de ${paidTransactions.length} eventos encontrados. Processando um lote de teste com ${batch.length} eventos...`);
+        console.log(`[ADMIN] Processando página ${page}/${totalPages}. Lote com ${batch.length} eventos.`);
 
         for (const transaction of batch) {
-            // Enriquecendo os dados da transação com nome/sobrenome, se encontrados
             const extraUserData = userDataMap.get(transaction.click_id);
             const enrichedTransactionData = { ...transaction, ...extraUserData };
-
             const result = await sendHistoricalMetaEvent('Purchase', enrichedTransactionData, transaction, targetPixel);
             
             detailedResults.push({
@@ -333,14 +322,14 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
                 payload_sent: result.payload,
                 meta_response: result.error || 'Enviado com sucesso.'
             });
-            await new Promise(resolve => setTimeout(resolve, 200));
+            await new Promise(resolve => setTimeout(resolve, 100)); // Pausa entre requisições
         }
         
-        console.log(`[ADMIN] Lote de teste concluído.`);
-        
-        // 4. Retorna o resultado detalhado para o frontend
         res.status(200).json({
-            summary: `Lote de teste concluído! Processados ${batch.length} de ${paidTransactions.length} eventos encontrados.`,
+            total_events: totalEvents,
+            total_pages: totalPages,
+            current_page: page,
+            limit: limit,
             results: detailedResults
         });
 
@@ -349,11 +338,9 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor ao processar o reenvio.' });
     }
 });
-// --- FIM DA NOVA FUNCIONALIDADE E BOAS PRÁTICAS ---
 
 
-
-// --- ROTAS PARA NOTIFICAÇÕES (CORRIGIDO) ---
+// --- ROTAS PARA NOTIFICAÇÕES ---
 app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
     if (!process.env.VAPID_PUBLIC_KEY) {
         return res.status(500).send('VAPID Public Key não configurada no servidor.');
@@ -367,9 +354,7 @@ app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     res.status(201).json({});
 });
 
-// ... (O resto do seu código `server.js` continua aqui sem alterações)
-// ... (O código das rotas /api/admin/dashboard, /api/admin/ranking, sellers, etc. permanece igual)
-// ...
+// --- ROTAS GERAIS (CONTINUAÇÃO) ---
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -469,7 +454,6 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar transações.' });
     }
 });
-
 app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -489,9 +473,6 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
     }
 });
-
-// ... (O resto do seu código `server.js` continua aqui sem alterações)
-// --- ROTAS DE AUTENTICAÇÃO ---
 app.post('/api/sellers/register', async (req, res) => {
     const sql = getDbConnection();
     const { name, email, password } = req.body;
@@ -517,7 +498,6 @@ app.post('/api/sellers/register', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
 app.post('/api/sellers/login', async (req, res) => {
     const sql = getDbConnection();
     const { email, password } = req.body;
@@ -550,8 +530,6 @@ app.post('/api/sellers/login', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
-// --- ROTA DE DADOS DO PAINEL ---
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -580,8 +558,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
-
-// --- NOVA ROTA PARA CONQUISTAS E RANKING ---
 app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -638,9 +614,6 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
         res.status(500).json({ message: 'Erro ao buscar dados de ranking.' });
     }
 });
-
-
-// --- ROTAS DE GERENCIAMENTO (CRUD) ---
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { account_name, pixel_id, meta_api_token } = req.body;
@@ -654,7 +627,6 @@ app.post('/api/pixels', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o pixel.' });
     }
 });
-
 app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -665,7 +637,6 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o pixel.' });
     }
 });
-
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_name, bot_token } = req.body;
@@ -691,7 +662,6 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
 });
-
 app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -702,7 +672,6 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o bot.' });
     }
 });
-
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { bot_id } = req.body;
@@ -736,10 +705,9 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: errorMessage });
     }
 });
-
 app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
-    const { botIds } = req.query; // Recebe uma string de IDs: "1,2,3"
+    const { botIds } = req.query; 
 
     if (!botIds) {
         return res.status(400).json({ message: 'IDs dos bots são obrigatórios.' });
@@ -747,7 +715,6 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     const botIdArray = botIds.split(',').map(id => parseInt(id.trim(), 10));
 
     try {
-        // Pega todos os usuários únicos dos bots selecionados
         const users = await sql`
             SELECT DISTINCT ON (chat_id) chat_id, first_name, last_name, username 
             FROM telegram_chats 
@@ -759,8 +726,6 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
     }
 });
-
-
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
@@ -795,7 +760,6 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar a pressel.' });
     }
 });
-
 app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -806,7 +770,6 @@ app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir a pressel.' });
     }
 });
-
 app.post('/api/checkouts', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
@@ -840,7 +803,6 @@ app.post('/api/checkouts', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao salvar o checkout.' });
     }
 });
-
 app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -851,8 +813,6 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o checkout.' });
     }
 });
-
-// --- ROTAS DE CONFIGURAÇÃO ---
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { 
@@ -876,7 +836,6 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
-
 app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { utmify_api_token } = req.body;
@@ -890,8 +849,6 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
-
-// --- ROTA DE RASTREAMENTO E CONSULTAS ---
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -940,8 +897,6 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
-
 app.post('/api/click/info', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -975,8 +930,6 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao consultar informações do clique.' });
     }
 });
-
-// --- ROTAS DE DASHBOARD E TRANSAÇÕES ---
 app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -1024,7 +977,7 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
             clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
         ] = await Promise.all([
-            totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
+            totalClicksQuery, pixGeneratedResult, pixPaidQuery, botsPerformanceQuery,
             clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
             deviceOSQuery
         ]);
@@ -1053,7 +1006,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -1070,8 +1022,6 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados das transações.' });
     }
 });
-
-// --- ROTA DE GERAÇÃO DE PIX ---
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -1127,8 +1077,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao processar a geração de PIX.' });
     }
 });
-
-// ROTA PARA CONSULTAR STATUS DA TRANSAÇÃO PIX (VERSÃO CORRIGIDA E COMPLETA)
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
     const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
@@ -1182,7 +1130,6 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao consultar o status.' });
     }
 });
-// --- ROTA DE TESTE DE PROVEDOR DE PIX ---
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -1217,9 +1164,6 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         });
     }
 });
-
-
-// --- ROTA PARA TESTAR A ROTA DE PRIORIDADE ---
 app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -1279,8 +1223,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
         });
     }
 });
-
-// --- ROTA DE WEBHOOK DO TELEGRAM ---
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const sql = getDbConnection();
     const { botId } = req.params;
@@ -1372,9 +1314,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     
     res.sendStatus(200);
 });
-
-
-// --- ROTAS DA CENTRAL DE DISPAROS ---
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -1385,7 +1324,6 @@ app.get('/api/dispatches', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar histórico.' });
     }
 });
-
 app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const { id } = req.params;
@@ -1403,8 +1341,6 @@ app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar detalhes.' });
     }
 });
-
-// ROTA DE DISPARO EM MASSA (MULTI-BOT)
 app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
     const sql = getDbConnection();
     const sellerId = req.user.id;
@@ -1470,9 +1406,6 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
         if (!res.headersSent) res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
     }
 });
-
-
-// --- WEBHOOKS (CORRIGIDOS) ---
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
@@ -1512,8 +1445,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
-
-// --- FUNÇÃO DE ENVIO PARA UTIFY ---
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     if (!sellerData.utmify_api_token) { return; }
     const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
@@ -1549,8 +1480,6 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         console.error(`Erro ao enviar evento '${status}' para a Utmify:`, error.response?.data || error.message);
     }
 }
-
-// --- FUNÇÃO GENÉRICA DE ENVIO PARA META ---
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     const sql = getDbConnection();
     try {
@@ -1630,9 +1559,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data?.error?.message || error.message);
     }
 }
-
-
-// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (OTIMIZADA) ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
