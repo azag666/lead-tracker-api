@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const path = require('path');
 const crypto = require('crypto');
-const webpush = require('web-push'); // Adicionado para notificações
+const webpush = require('web-push');
 
 const app = express();
 app.use(cors());
@@ -22,7 +22,7 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
         process.env.VAPID_PRIVATE_KEY
     );
 }
-let adminSubscription = null; // Em produção, isto deve ser guardado numa base de dados.
+let adminSubscription = null;
 
 // --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
 function getDbConnection() {
@@ -161,14 +161,9 @@ async function checkAndAwardAchievements(seller_id) {
 async function handleSuccessfulPayment(transaction_id, customerData) {
     const sql = getDbConnection();
     try {
-        // ATENÇÃO: A lógica foi alterada para usar o ID único da transação, evitando duplicidade.
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
-        if (!transaction) {
-            // Se não encontrou transação para atualizar, é porque já foi processada.
-            return;
-        }
+        if (!transaction) { return; }
 
-        // Envia notificação ao admin
         if (adminSubscription && webpush) {
             const payload = JSON.stringify({
                 title: 'Nova Venda Paga!',
@@ -206,29 +201,38 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
-// --- INÍCIO DA CORREÇÃO ---
 
+// --- INÍCIO DA NOVA FUNCIONALIDADE E BOAS PRÁTICAS ---
+
+/**
+ * Função aprimorada para enviar eventos históricos para a API da Meta.
+ * Inclui mais dados do usuário para melhorar a Qualidade de Correspondência (Event Match Quality).
+ * @param {string} eventName - Nome do evento (ex: 'Purchase').
+ * @param {object} clickData - Dados do clique e do usuário (enriquecido).
+ * @param {object} transactionData - Dados da transação.
+ * @param {object} targetPixel - Objeto com { pixelId, accessToken }.
+ * @returns {object} - Objeto com o resultado do envio.
+ */
 async function sendHistoricalMetaEvent(eventName, clickData, transactionData, targetPixel) {
+    let payload_sent = null; // Guardará o payload para feedback
     try {
         const userData = {};
 
-        // Adiciona dados apenas se eles existirem e forem válidos
-        if (clickData.ip_address) {
-            userData.client_ip_address = clickData.ip_address;
-        }
-        if (clickData.user_agent) {
-            userData.client_user_agent = clickData.user_agent;
-        }
-        if (clickData.fbp) {
-            userData.fbp = clickData.fbp;
-        }
-        if (clickData.fbc) {
-            userData.fbc = clickData.fbc;
-        }
-        if (clickData.click_id) {
-            userData.external_id = clickData.click_id.replace('/start ', '');
-        }
+        // Dados do Navegador (Obrigatórios se disponíveis)
+        if (clickData.ip_address) userData.client_ip_address = clickData.ip_address;
+        if (clickData.user_agent) userData.client_user_agent = clickData.user_agent;
+        if (clickData.fbp) userData.fbp = clickData.fbp;
+        if (clickData.fbc) userData.fbc = clickData.fbc;
 
+        // Dados Pessoais (Melhoram muito a correspondência)
+        if (clickData.firstName) {
+            userData.fn = crypto.createHash('sha256').update(clickData.firstName.toLowerCase()).digest('hex');
+        }
+        if (clickData.lastName) {
+            userData.ln = crypto.createHash('sha256').update(clickData.lastName.toLowerCase()).digest('hex');
+        }
+        
+        // Dados de Localização
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
         if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
@@ -237,7 +241,6 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
         const { pixelId, accessToken } = targetPixel;
-        
         const event_time = Math.floor(new Date(transactionData.paid_at).getTime() / 1000);
         const event_id = `${eventName}.${transactionData.id}.${pixelId}`;
 
@@ -246,65 +249,46 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
                 event_name: eventName,
                 event_time: event_time,
                 event_id,
-                user_data: userData,
                 action_source: 'other',
+                user_data: userData,
                 custom_data: {
                     currency: 'BRL',
                     value: parseFloat(transactionData.pix_value)
                 },
             }]
         };
-        
-        // Se o objeto userData estiver vazio, a Meta pode reclamar. É essencial ter pelo menos IP ou User Agent.
-        // Se ambos faltarem, o evento provavelmente falhará, o que é esperado para cliques muito antigos/incompletos.
+        payload_sent = payload; // Guarda o payload antes de enviar
+
         if (Object.keys(userData).length === 0) {
-             console.warn(`[SKIP] Pulando transação ${transactionData.id} por falta de dados de usuário (IP/UserAgent).`);
-             return { success: false, error: 'Dados de usuário insuficientes.' };
+            throw new Error('Dados de usuário insuficientes para envio (IP/UserAgent faltando).');
         }
 
         await axios.post(`https://graph.facebook.com/v19.0/${pixelId}/events`, payload, { params: { access_token: accessToken } });
-        return { success: true };
+        
+        return { success: true, payload: payload_sent };
 
     } catch (error) {
-        // Log aprimorado para mostrar a mensagem específica da Meta
-        const metaError = error.response?.data?.error?.message || error.message;
-        console.error(`Erro ao reenviar evento histórico para a Meta (Transação ID: ${transactionData.id}):`, metaError);
-        return { success: false, error: metaError };
+        const metaError = error.response?.data?.error || { message: error.message };
+        console.error(`Erro ao reenviar evento (Transação ID: ${transactionData.id}):`, metaError.message);
+        return { success: false, error: metaError, payload: payload_sent };
     }
 }
-// --- FIM DA CORREÇÃO ---
 
 
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
+    console.log(`[ADMIN] Requisição recebida em /api/admin/resend-events.`);
     const sql = getDbConnection();
     const { target_pixel_id, target_meta_api_token, seller_id, start_date, end_date } = req.body;
 
-    if (!target_pixel_id || !target_meta_api_token) {
-        return res.status(400).json({ message: '`target_pixel_id` e `target_meta_api_token` são obrigatórios.' });
-    }
-    if (!start_date || !end_date) {
-        return res.status(400).json({ message: '`start_date` e `end_date` (formato YYYY-MM-DD) são obrigatórios.' });
+    if (!target_pixel_id || !target_meta_api_token || !start_date || !end_date) {
+        return res.status(400).json({ message: 'Todos os campos obrigatórios devem ser preenchidos.' });
     }
 
     try {
-        let query;
-        if (seller_id) {
-            query = sql`
-                SELECT pt.*, c.ip_address, c.user_agent, c.fbp, c.fbc, c.click_id, c.city, c.state
-                FROM pix_transactions pt
-                JOIN clicks c ON pt.click_id_internal = c.id
-                WHERE pt.status = 'paid' AND c.seller_id = ${seller_id} AND pt.paid_at BETWEEN ${start_date} AND ${end_date}
-                ORDER BY pt.paid_at ASC;
-            `;
-        } else {
-             query = sql`
-                SELECT pt.*, c.ip_address, c.user_agent, c.fbp, c.fbc, c.click_id, c.city, c.state
-                FROM pix_transactions pt
-                JOIN clicks c ON pt.click_id_internal = c.id
-                WHERE pt.status = 'paid' AND pt.paid_at BETWEEN ${start_date} AND ${end_date}
-                ORDER BY pt.paid_at ASC;
-            `;
-        }
+        // 1. Busca as transações pagas com os dados de clique
+        const query = seller_id
+            ? sql`SELECT pt.*, c.click_id, c.ip_address, c.user_agent, c.fbp, c.fbc, c.city, c.state FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE pt.status = 'paid' AND c.seller_id = ${seller_id} AND pt.paid_at BETWEEN ${start_date} AND ${end_date} ORDER BY pt.paid_at ASC`
+            : sql`SELECT pt.*, c.click_id, c.ip_address, c.user_agent, c.fbp, c.fbc, c.city, c.state FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE pt.status = 'paid' AND pt.paid_at BETWEEN ${start_date} AND ${end_date} ORDER BY pt.paid_at ASC`;
         
         const paidTransactions = await query;
         
@@ -312,37 +296,61 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             return res.status(404).json({ message: 'Nenhuma transação paga encontrada para os filtros fornecidos.' });
         }
 
-        res.status(202).json({ 
-            message: `Processo iniciado. ${paidTransactions.length} eventos de Purchase serão reenviados para o Pixel ${target_pixel_id}. Isso pode levar vários minutos.` 
-        });
+        // 2. Busca dados dos usuários do Telegram para enriquecer os eventos
+        const clickIds = paidTransactions.map(t => t.click_id).filter(Boolean);
+        let userDataMap = new Map();
+        if (clickIds.length > 0) {
+            const telegramUsers = await sql`
+                SELECT click_id, first_name, last_name 
+                FROM telegram_chats 
+                WHERE click_id = ANY(${clickIds})
+            `;
+            telegramUsers.forEach(user => {
+                // O click_id no telegram_chats não tem o '/start ', então normalizamos
+                const cleanClickId = user.click_id.startsWith('/start ') ? user.click_id : `/start ${user.click_id}`;
+                userDataMap.set(cleanClickId, { firstName: user.first_name, lastName: user.last_name });
+            });
+        }
+        
+        // 3. Processa um lote de teste (os 5 primeiros)
+        const batchSize = 5;
+        const batch = paidTransactions.slice(0, batchSize);
+        const detailedResults = [];
+        const targetPixel = { pixelId: target_pixel_id, accessToken: target_meta_api_token };
 
-        (async () => {
-            let successCount = 0;
-            let failureCount = 0;
-            const targetPixel = { pixelId: target_pixel_id, accessToken: target_meta_api_token };
+        console.log(`[ADMIN] Total de ${paidTransactions.length} eventos encontrados. Processando um lote de teste com ${batch.length} eventos...`);
 
-            console.log(`[ADMIN] Iniciando reenvio de ${paidTransactions.length} eventos...`);
+        for (const transaction of batch) {
+            // Enriquecendo os dados da transação com nome/sobrenome, se encontrados
+            const extraUserData = userDataMap.get(transaction.click_id);
+            const enrichedTransactionData = { ...transaction, ...extraUserData };
 
-            for (const transaction of paidTransactions) {
-                const result = await sendHistoricalMetaEvent('Purchase', transaction, transaction, targetPixel);
-                if (result.success) {
-                    successCount++;
-                } else {
-                    failureCount++;
-                }
-                await new Promise(resolve => setTimeout(resolve, 200)); 
-            }
+            const result = await sendHistoricalMetaEvent('Purchase', enrichedTransactionData, transaction, targetPixel);
             
-            console.log(`[ADMIN] Reenvio concluído. Sucessos: ${successCount}, Falhas: ${failureCount}.`);
-        })();
+            detailedResults.push({
+                transaction_id: transaction.id,
+                status: result.success ? 'success' : 'failure',
+                payload_sent: result.payload,
+                meta_response: result.error || 'Enviado com sucesso.'
+            });
+            await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        
+        console.log(`[ADMIN] Lote de teste concluído.`);
+        
+        // 4. Retorna o resultado detalhado para o frontend
+        res.status(200).json({
+            summary: `Lote de teste concluído! Processados ${batch.length} de ${paidTransactions.length} eventos encontrados.`,
+            results: detailedResults
+        });
 
     } catch (error) {
         console.error("Erro geral na rota de reenviar eventos:", error);
-        if (!res.headersSent) {
-            res.status(500).json({ message: 'Erro interno do servidor ao iniciar o processo de reenvio.' });
-        }
+        res.status(500).json({ message: 'Erro interno do servidor ao processar o reenvio.' });
     }
 });
+// --- FIM DA NOVA FUNCIONALIDADE E BOAS PRÁTICAS ---
+
 
 
 // --- ROTAS PARA NOTIFICAÇÕES (CORRIGIDO) ---
@@ -353,17 +361,15 @@ app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
     res.type('text/plain').send(process.env.VAPID_PUBLIC_KEY);
 });
 
-// ... (O resto do seu código `server.js` continua aqui sem alterações)
-// ... (COLE O RESTANTE DO SEU CÓDIGO A PARTIR DAQUI)
-// ...
-
 app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     adminSubscription = req.body;
     console.log("Inscrição de admin para notificações recebida e guardada.");
     res.status(201).json({});
 });
 
-// ... (O resto das suas rotas de admin, sellers, etc., continua igual)
+// ... (O resto do seu código `server.js` continua aqui sem alterações)
+// ... (O código das rotas /api/admin/dashboard, /api/admin/ranking, sellers, etc. permanece igual)
+// ...
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     const sql = getDbConnection();
     try {
@@ -952,10 +958,7 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
         const seller_id = sellerResult[0].id;
         const seller_email = sellerResult[0].email;
         
-        // ##### INÍCIO DA MODIFICAÇÃO #####
-        // Lida com ambos os formatos: "lead000103" e "/start lead000103"
         const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
-        // ##### FIM DA MODIFICAÇÃO #####
         
         const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
         
@@ -981,9 +984,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // ** Lógica de consulta reescrita para ser mais segura e evitar erros de sintaxe **
-
-        // Queries
         const totalClicksQuery = hasDateFilter
             ? sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate}`
             : sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId}`;
@@ -1020,26 +1020,12 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             ? sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY os ORDER BY clicks DESC`
             : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
 
-        // Execução de todas as queries em paralelo
         const [
-            totalClicksResult,
-            pixGeneratedResult,
-            pixPaidResult,
-            botsPerformance,
-            clicksByState,
-            dailyRevenue,
-            trafficSource,
-            topPlacements,
-            deviceOS
+            totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
+            clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
         ] = await Promise.all([
-            totalClicksQuery,
-            pixGeneratedQuery,
-            pixPaidQuery,
-            botsPerformanceQuery,
-            clicksByStateQuery,
-            dailyRevenueQuery,
-            trafficSourceQuery,
-            topPlacementsQuery,
+            totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
+            clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
             deviceOSQuery
         ]);
 
@@ -1073,18 +1059,10 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
         const transactions = await sql`
-            SELECT 
-                pt.status, 
-                pt.pix_value, 
-                COALESCE(tb.bot_name, ch.name, 'Checkout') as source_name, 
-                pt.provider, 
-                pt.created_at
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            LEFT JOIN pressels p ON c.pressel_id = p.id
-            LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
-            LEFT JOIN checkouts ch ON c.checkout_id = ch.id
-            WHERE c.seller_id = ${sellerId}
+            SELECT pt.status, pt.pix_value, COALESCE(tb.bot_name, ch.name, 'Checkout') as source_name, pt.provider, pt.created_at
+            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            LEFT JOIN pressels p ON c.pressel_id = p.id LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
+            LEFT JOIN checkouts ch ON c.checkout_id = ch.id WHERE c.seller_id = ${sellerId}
             ORDER BY pt.created_at DESC;`;
         res.status(200).json(transactions);
     } catch (error) {
@@ -1118,18 +1096,12 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
         
-        const providerOrder = [
-            seller.pix_provider_primary,
-            seller.pix_provider_secondary,
-            seller.pix_provider_tertiary
-        ].filter(Boolean);
-
+        const providerOrder = [ seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary ].filter(Boolean);
         let lastError = null;
 
         for (const provider of providerOrder) {
             try {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
-                
                 const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
                 if (click.pressel_id) {
@@ -1171,33 +1143,23 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
             return res.status(401).json({ message: 'API Key inválida.' });
         }
         
-        // 1. Busca a transação no seu banco de dados
         const [transaction] = await sql`
-            SELECT pt.*
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id})
-              AND c.seller_id = ${seller.id}`;
+            SELECT pt.* FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id}) AND c.seller_id = ${seller.id}`;
 
         if (!transaction) {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
         }
-
-        // 2. Se já está paga no seu banco, retorna imediatamente.
         if (transaction.status === 'paid') {
             return res.status(200).json({ status: 'paid' });
         }
 
-        // 3. Se estiver pendente, FAZ A VERIFICAÇÃO EM TEMPO REAL com o provedor
-        let providerStatus;
-        let customerData = {};
-
+        let providerStatus, customerData = {};
         try {
             if (transaction.provider === 'pushinpay') {
                 const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                 providerStatus = response.data.status;
                 customerData = { name: response.data.payer_name, document: response.data.payer_document };
-
             } else if (transaction.provider === 'cnpay') {
                 // ... lógica para cnpay
             } else if (transaction.provider === 'oasyfy') {
@@ -1208,13 +1170,11 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
              return res.status(200).json({ status: 'pending' });
         }
 
-        // 4. Se a verificação em tempo real retornar "pago", atualiza o banco e dispara os eventos
         if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
             await handleSuccessfulPayment(transaction.id, customerData);
             return res.status(200).json({ status: 'paid' });
         }
 
-        // 5. Se não, apenas retorna que continua pendente.
         res.status(200).json({ status: 'pending' });
 
     } catch (error) {
@@ -1237,7 +1197,6 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
         
         const value_cents = 50;
-        
         const startTime = Date.now();
         const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
         const endTime = Date.now();
@@ -1294,13 +1253,9 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 
                 testLog.push(`SUCESSO com Provedor ${position} (${provider.toUpperCase()}).`);
                 return res.status(200).json({
-                    success: true,
-                    position: position,
-                    provider: provider.toUpperCase(),
-                    acquirer: pixResult.acquirer,
-                    responseTime: responseTime,
-                    qr_code_text: pixResult.qr_code_text,
-                    log: testLog
+                    success: true, position: position, provider: provider.toUpperCase(),
+                    acquirer: pixResult.acquirer, responseTime: responseTime,
+                    qr_code_text: pixResult.qr_code_text, log: testLog
                 });
 
             } catch (error) {
@@ -1312,16 +1267,14 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 
         console.error("Todos os provedores na rota de prioridade falharam.");
         return res.status(500).json({
-            success: false,
-            message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
+            success: false, message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
             log: testLog
         });
 
     } catch (error) {
         console.error(`[PIX PRIORITY TEST ERROR] Erro geral:`, error.message);
         res.status(500).json({ 
-            success: false,
-            message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
+            success: false, message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
             log: testLog
         });
     }
@@ -1474,8 +1427,7 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
         res.status(202).json({ message: `Disparo agendado para ${users.length} usuários.`, logId });
         
         (async () => {
-            let successCount = 0;
-            let failureCount = 0;
+            let successCount = 0, failureCount = 0;
             const botTokenMap = new Map(bots.map(b => [b.id, b.bot_token]));
 
             for (const user of users) {
@@ -1528,7 +1480,6 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: payer_name, document: payer_document });
             }
         } catch (error) { console.error("Erro no webhook da PushinPay:", error); }
@@ -1542,7 +1493,6 @@ app.post('/api/webhook/cnpay', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da CNPay:", error); }
@@ -1556,7 +1506,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
             const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             if (tx && tx.status !== 'paid') {
-                // CORREÇÃO: Passando o ID único da transação.
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
             }
         } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
@@ -1566,9 +1515,7 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
 
 // --- FUNÇÃO DE ENVIO PARA UTIFY ---
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
-    if (!sellerData.utmify_api_token) {
-        return;
-    }
+    if (!sellerData.utmify_api_token) { return; }
     const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
     const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
     const payload = {
@@ -1685,12 +1632,10 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 }
 
 
-// --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (CORRIGIDA) ---
 // --- ROTINA DE VERIFICAÇÃO DE TRANSAÇÕES PENDENTES (OTIMIZADA) ---
 async function checkPendingTransactions() {
     const sql = getDbConnection();
     try {
-        // ALTERAÇÃO: Busca transações pendentes apenas dos últimos 30 minutos.
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'`;
@@ -1724,14 +1669,12 @@ async function checkPendingTransactions() {
                     console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
                 }
             }
-
-            // Pausa de 200ms entre cada verificação para evitar bloqueios
             await new Promise(resolve => setTimeout(resolve, 200)); 
         }
     } catch (error) {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
-setInterval(checkPendingTransactions, 30000); // Mantenha o intervalo de 30 segundos
+setInterval(checkPendingTransactions, 30000);
 
 module.exports = app;
