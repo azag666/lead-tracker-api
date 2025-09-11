@@ -1113,10 +1113,29 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
                 const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                 providerStatus = response.data.status;
                 customerData = { name: response.data.payer_name, document: response.data.payer_document };
-            } else if (transaction.provider === 'cnpay') {
-                // ... lógica para cnpay
-            } else if (transaction.provider === 'oasyfy') {
-                 // ... lógica para oasyfy
+            } else if (transaction.provider === 'cnpay' || transaction.provider === 'oasyfy') {
+                const isCnpay = transaction.provider === 'cnpay';
+                const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+                const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+
+                if (!publicKey || !secretKey) {
+                    console.warn(`Credenciais para ${transaction.provider.toUpperCase()} não configuradas para o vendedor ${seller.id}.`);
+                    return res.status(200).json({ status: 'pending' });
+                }
+
+                const apiUrl = isCnpay 
+                    ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${transaction.provider_transaction_id}`
+                    : `https://app.oasyfy.com/api/v1/gateway/transactions?id=${transaction.provider_transaction_id}`;
+
+                const response = await axios.get(apiUrl, { 
+                    headers: { 
+                        'x-public-key': publicKey, 
+                        'x-secret-key': secretKey 
+                    } 
+                });
+                
+                providerStatus = response.data.status;
+                customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
             }
         } catch (providerError) {
              console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
@@ -1586,10 +1605,26 @@ async function checkPendingTransactions() {
                     const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                     providerStatus = response.data.status;
                     customerData = { name: response.data.payer_name, document: response.data.payer_document };
-                } else if (tx.provider === 'cnpay') {
-                    // ... (lógica para outros provedores)
-                } else if (tx.provider === 'oasyfy') {
-                    // ... (lógica para outros provedores)
+                } else if (tx.provider === 'cnpay' || tx.provider === 'oasyfy') {
+                    const isCnpay = tx.provider === 'cnpay';
+                    const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+                    const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+
+                    if (!publicKey || !secretKey) continue; // Pula se não houver credenciais
+
+                    const apiUrl = isCnpay
+                        ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`
+                        : `https://app.oasyfy.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`;
+                    
+                    const response = await axios.get(apiUrl, {
+                        headers: {
+                            'x-public-key': publicKey,
+                            'x-secret-key': secretKey
+                        }
+                    });
+
+                    providerStatus = response.data.status;
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
                 }
                 
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
