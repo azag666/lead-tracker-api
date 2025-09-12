@@ -14,6 +14,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// --- OTIMIZAÇÃO: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
+const sql = neon(process.env.DATABASE_URL);
+
 // --- CONFIGURAÇÃO DAS NOTIFICAÇÕES ---
 if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
     webpush.setVapidDetails(
@@ -24,10 +27,7 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 let adminSubscription = null;
 
-// --- FUNÇÃO PARA OBTER CONEXÃO COM O BANCO ---
-function getDbConnection() {
-    return neon(process.env.DATABASE_URL);
-}
+// --- A FUNÇÃO getDbConnection() foi REMOVIDA para otimização ---
 
 // --- CONFIGURAÇÃO ---
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
@@ -57,7 +57,6 @@ async function logApiRequest(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) return next();
     try {
-        const sql = getDbConnection();
         const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
         if (sellerResult.length > 0) {
             const sellerId = sellerResult[0].id;
@@ -128,7 +127,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
 
 // --- FUNÇÃO PARA VERIFICAR E CONCEDER CONQUISTAS ---
 async function checkAndAwardAchievements(seller_id) {
-    const sql = getDbConnection();
     try {
         const [totalRevenueResult] = await sql`
             SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
@@ -157,9 +155,8 @@ async function checkAndAwardAchievements(seller_id) {
 }
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (COM TRATAMENTO DE ERRO DE NOTIFICAÇÃO) ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
 async function handleSuccessfulPayment(transaction_id, customerData) {
-    const sql = getDbConnection();
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
         if (!transaction) { return; }
@@ -261,10 +258,9 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
 
 
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     const { 
         target_pixel_id, target_meta_api_token, seller_id, 
-        start_date, end_date, page = 1, limit = 50 // Adiciona paginação
+        start_date, end_date, page = 1, limit = 50
     } = req.body;
 
     if (!target_pixel_id || !target_meta_api_token || !start_date || !end_date) {
@@ -300,7 +296,6 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             });
         }
 
-        // Paginação do lote
         const totalEvents = allPaidTransactions.length;
         const totalPages = Math.ceil(totalEvents / limit);
         const offset = (page - 1) * limit;
@@ -322,7 +317,7 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
                 payload_sent: result.payload,
                 meta_response: result.error || 'Enviado com sucesso.'
             });
-            await new Promise(resolve => setTimeout(resolve, 100)); // Pausa entre requisições
+            await new Promise(resolve => setTimeout(resolve, 100));
         }
         
         res.status(200).json({
@@ -356,7 +351,6 @@ app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
 
 // --- ROTAS GERAIS (CONTINUAÇÃO) ---
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const totalSellers = await sql`SELECT COUNT(*) FROM sellers;`;
         const paidTransactions = await sql`SELECT COUNT(*) as count, SUM(pix_value) as total_revenue FROM pix_transactions WHERE status = 'paid';`;
@@ -375,7 +369,6 @@ app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     }
 });
 app.get('/api/admin/ranking', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const ranking = await sql`
             SELECT s.id, s.name, s.email, COUNT(pt.id) AS total_sales, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
@@ -389,7 +382,6 @@ app.get('/api/admin/ranking', authenticateAdmin, async (req, res) => {
     }
 });
 app.get('/api/admin/sellers', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const sellers = await sql`SELECT id, name, email, created_at, is_active FROM sellers ORDER BY created_at DESC;`;
         res.json(sellers);
@@ -398,7 +390,6 @@ app.get('/api/admin/sellers', authenticateAdmin, async (req, res) => {
     }
 });
 app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     const { id } = req.params;
     const { isActive } = req.body;
     try {
@@ -409,7 +400,6 @@ app.post('/api/admin/sellers/:id/toggle-active', authenticateAdmin, async (req, 
     }
 });
 app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     const { id } = req.params;
     const { newPassword } = req.body;
     if (!newPassword || newPassword.length < 8) return res.status(400).json({ message: 'A nova senha deve ter pelo menos 8 caracteres.' });
@@ -422,7 +412,6 @@ app.put('/api/admin/sellers/:id/password', authenticateAdmin, async (req, res) =
     }
 });
 app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     const { id } = req.params;
     const { pushinpay_token, cnpay_public_key, cnpay_secret_key } = req.body;
     try {
@@ -436,7 +425,6 @@ app.put('/api/admin/sellers/:id/credentials', authenticateAdmin, async (req, res
     }
 });
 app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const page = parseInt(req.query.page || 1);
         const limit = parseInt(req.query.limit || 20);
@@ -455,7 +443,6 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
     }
 });
 app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const usageData = await sql`
             SELECT
@@ -474,7 +461,6 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     }
 });
 app.post('/api/sellers/register', async (req, res) => {
-    const sql = getDbConnection();
     const { name, email, password } = req.body;
 
     if (!name || !email || !password || password.length < 8) {
@@ -499,7 +485,6 @@ app.post('/api/sellers/register', async (req, res) => {
     }
 });
 app.post('/api/sellers/login', async (req, res) => {
-    const sql = getDbConnection();
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
     try {
@@ -531,7 +516,6 @@ app.post('/api/sellers/login', async (req, res) => {
     }
 });
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
         const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
@@ -559,7 +543,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     }
 });
 app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
         
@@ -615,7 +598,6 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
     }
 });
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { account_name, pixel_id, meta_api_token } = req.body;
     if (!account_name || !pixel_id || !meta_api_token) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     try {
@@ -628,7 +610,6 @@ app.post('/api/pixels', authenticateJwt, async (req, res) => {
     }
 });
 app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         await sql`DELETE FROM pixel_configurations WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
         res.status(204).send();
@@ -638,7 +619,6 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/bots', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { bot_name, bot_token } = req.body;
     if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
     try {
@@ -663,7 +643,6 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     }
 });
 app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         await sql`DELETE FROM telegram_bots WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
         res.status(204).send();
@@ -673,7 +652,6 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { bot_id } = req.body;
     if (!bot_id) return res.status(400).json({ message: 'ID do bot é obrigatório.' });
 
@@ -706,7 +684,6 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     }
 });
 app.get('/api/bots/users', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { botIds } = req.query; 
 
     if (!botIds) {
@@ -727,7 +704,6 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { name, bot_id, white_page_url, pixel_ids } = req.body;
     if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     
@@ -761,7 +737,6 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
     }
 });
 app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         await sql`DELETE FROM pressels WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
         res.status(204).send();
@@ -771,7 +746,6 @@ app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/checkouts', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
 
     if (!name || !product_name || !redirect_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) {
@@ -804,7 +778,6 @@ app.post('/api/checkouts', authenticateJwt, async (req, res) => {
     }
 });
 app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         await sql`DELETE FROM checkouts WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
         res.status(204).send();
@@ -814,7 +787,6 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { 
         pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
         pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
@@ -837,7 +809,6 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { utmify_api_token } = req.body;
     try {
         await sql`UPDATE sellers SET 
@@ -850,55 +821,80 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
-    const apiKey = req.headers['x-api-key'];
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
-    
-    if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
-    
+
+    if (!sellerApiKey || (!presselId && !checkoutId)) {
+        return res.status(400).json({ message: 'Dados insuficientes.' });
+    }
+
     const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
-    let city = 'Desconhecida', state = 'Desconhecido';
+
     try {
-        if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
-            const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
-            city = geo.data.city || city;
-            state = geo.data.regionName || state;
-        }
-    } catch (e) { console.error("Erro ao buscar geolocalização:", e.message); }
-    
-    try {
+        // --- ETAPA 1: Inserção Rápida (Apenas o essencial) ---
+        // Insere o clique sem dados de geolocalização para ser mais rápido.
         const result = await sql`INSERT INTO clicks (
-            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
+            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
         ) 
         SELECT
-            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${city}, ${state}, ${fbclid}, ${fbp}, ${fbc},
+            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${fbclid}, ${fbp}, ${fbc},
             ${utm_source || null}, ${utm_campaign || null}, ${utm_medium || null}, ${utm_content || null}, ${utm_term || null}
         FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING *;`;
-        
-        if (result.length === 0) return res.status(404).json({ message: 'API Key inválida.' });
-        
+
+        if (result.length === 0) {
+            return res.status(404).json({ message: 'API Key inválida.' });
+        }
+
         const newClick = result[0];
         const click_record_id = newClick.id;
         const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
         const db_click_id = `/start ${clean_click_id}`;
+        
+        // Atualiza o registro com o ID do clique formatado.
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
 
-        if (checkoutId) {
-            const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
-            const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
-            
-            await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
-        }
-        
+        // --- ETAPA 2: Resposta Imediata ---
+        // Envia a resposta para o cliente IMEDIATAMENTE. O redirecionamento ocorrerá agora.
         res.status(200).json({ status: 'success', click_id: clean_click_id });
+
+        // --- ETAPA 3: Tarefas em Segundo Plano (Não bloqueiam o usuário) ---
+        // Usamos uma função auto-executável para rodar as tarefas lentas.
+        (async () => {
+            try {
+                // Tarefa 1: Geolocalização
+                let city = 'Desconhecida', state = 'Desconhecido';
+                if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
+                    const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
+                    city = geo.data.city || city;
+                    state = geo.data.regionName || state;
+                }
+                // Atualiza o clique com os dados de localização, sem afetar o usuário.
+                await sql`UPDATE clicks SET city = ${city}, state = ${state} WHERE id = ${click_record_id}`;
+                console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
+
+                // Tarefa 2: Envio de evento para a Meta
+                if (checkoutId) {
+                    const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
+                    const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
+                    
+                    // A função sendMetaEvent já é assíncrona, basta chamá-la aqui.
+                    await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
+                    console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
+                }
+            } catch (backgroundError) {
+                console.error("Erro em tarefa de segundo plano (registerClick):", backgroundError.message);
+            }
+        })();
+
     } catch (error) {
         console.error("Erro ao registrar clique:", error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
+        // Garante que uma resposta de erro seja enviada se a parte inicial falhar.
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Erro interno do servidor.' });
+        }
     }
 });
 app.post('/api/click/info', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
     const { click_id } = req.body;
     if (!apiKey || !click_id) return res.status(400).json({ message: 'API Key e click_id são obrigatórios.' });
@@ -931,13 +927,11 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
     }
 });
 app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
-        let { startDate, endDate } = req.query; // <-- Mude de const para let
+        let { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // ADICIONE ESTA LINHA: Garante que a data final inclua o dia inteiro
         if (hasDateFilter) {
             endDate = `${endDate} 23:59:59`;
         }
@@ -982,7 +976,7 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
                totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
                clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
     ] = await Promise.all([
-              totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery, // <--- CORREÇÃO APLICADA
+              totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
               clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
               deviceOSQuery
    ]);
@@ -1012,7 +1006,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
     }
 });
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const sellerId = req.user.id;
         const transactions = await sql`
@@ -1028,7 +1021,6 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
-    const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
     const { click_id, value_cents, customer, product } = req.body;
     
@@ -1083,7 +1075,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     }
 });
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
-    const sql = getDbConnection();
     const apiKey = req.headers['x-api-key'];
     const { transaction_id } = req.params;
 
@@ -1155,7 +1146,6 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
     }
 });
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const sellerId = req.user.id;
     const { provider } = req.body;
 
@@ -1189,7 +1179,6 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const sellerId = req.user.id;
     let testLog = [];
 
@@ -1248,7 +1237,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
-    const sql = getDbConnection();
     const { botId } = req.params;
 
     if (req.body.callback_query) {
@@ -1339,7 +1327,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     res.sendStatus(200);
 });
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     try {
         const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
         res.status(200).json(dispatches);
@@ -1349,7 +1336,6 @@ app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     }
 });
 app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const { id } = req.params;
     try {
         const details = await sql`
@@ -1366,7 +1352,6 @@ app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
-    const sql = getDbConnection();
     const sellerId = req.user.id;
     const { botIds, flowType, initialText, ctaButtonText, pixValue, externalLink, imageUrl } = req.body;
 
@@ -1434,7 +1419,6 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
         try {
-            const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${id} AND provider = 'pushinpay'`;
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: payer_name, document: payer_document });
@@ -1447,7 +1431,6 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
-            const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
@@ -1460,7 +1443,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
-            const sql = getDbConnection();
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
@@ -1505,7 +1487,6 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
     }
 }
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
-    const sql = getDbConnection();
     try {
         let presselPixels = [];
         if (clickData.pressel_id) {
@@ -1584,7 +1565,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
     }
 }
 async function checkPendingTransactions() {
-    const sql = getDbConnection();
     try {
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
@@ -1610,7 +1590,7 @@ async function checkPendingTransactions() {
                     const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
                     const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
 
-                    if (!publicKey || !secretKey) continue; // Pula se não houver credenciais
+                    if (!publicKey || !secretKey) continue;
 
                     const apiUrl = isCnpay
                         ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`
