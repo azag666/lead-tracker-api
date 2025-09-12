@@ -117,9 +117,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             payer: clientPayload
         };
         
-        // AVISO: A API da SyncPay, conforme a documentação, não parece suportar split de pagamento diretamente na criação do PIX.
-        // O split de 2.99% não será aplicado aqui.
-
         const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -127,11 +124,11 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         pixData = response.data;
         acquirer = "SyncPay";
         
-        // --- CORREÇÃO APLICADA AQUI ---
-        // Ajustado para usar os nomes de campo corretos, que são `pix.code` e `pix.base64`
+        // --- CORREÇÃO FINAL APLICADA AQUI ---
+        // A resposta da SyncPay não tem um objeto `pix`. Os campos são diretos.
         return { 
-            qr_code_text: pixData.pix.code, 
-            qr_code_base64: pixData.pix.base64, 
+            qr_code_text: pixData.pixCopyPaste, 
+            qr_code_base64: pixData.pixQrCode, 
             transaction_id: pixData.transactionId, 
             acquirer, 
             provider 
@@ -1153,7 +1150,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 
         let providerStatus, customerData = {};
         try {
-            if (transaction.provider === 'syncpay') {
+            if (transaction.provider === 'syncpay') { // NOVO
                 const syncPayToken = await getSyncPayAuthToken(seller);
                 const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
                     headers: { 'Authorization': `Bearer ${syncPayToken}` }
@@ -1511,22 +1508,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
-
-// NOVO: Webhook para a SyncPay
-app.post('/api/webhook/syncpay', async (req, res) => {
-    const { transactionId, status, payer } = req.body;
-    console.log('[WEBHOOK SYNC PAY] Payload recebido:', req.body);
-    if (status === 'paid' || status === 'COMPLETED') {
-        try {
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'syncpay'`;
-            if (tx && tx.status !== 'paid') {
-                await handleSuccessfulPayment(tx.id, payer);
-            }
-        } catch (error) { console.error("Erro no webhook da SyncPay:", error); }
-    }
-    res.sendStatus(200);
-});
-
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     if (!sellerData.utmify_api_token) { return; }
     const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
