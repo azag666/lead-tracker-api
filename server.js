@@ -14,7 +14,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- OTIMIZAÇÃO: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
+// --- OTIMIZAÇÃO CRÍTICA: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
 const sql = neon(process.env.DATABASE_URL);
 
 // --- CONFIGURAÇÃO DAS NOTIFICAÇÕES ---
@@ -155,7 +155,7 @@ async function checkAndAwardAchievements(seller_id) {
 }
 
 
-// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO ---
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (COM TRATAMENTO DE ERRO DE NOTIFICAÇÃO) ---
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
@@ -260,7 +260,7 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
     const { 
         target_pixel_id, target_meta_api_token, seller_id, 
-        start_date, end_date, page = 1, limit = 50
+        start_date, end_date, page = 1, limit = 50 // Adiciona paginação
     } = req.body;
 
     if (!target_pixel_id || !target_meta_api_token || !start_date || !end_date) {
@@ -296,6 +296,7 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             });
         }
 
+        // Paginação do lote
         const totalEvents = allPaidTransactions.length;
         const totalPages = Math.ceil(totalEvents / limit);
         const offset = (page - 1) * limit;
@@ -317,7 +318,7 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
                 payload_sent: result.payload,
                 meta_response: result.error || 'Enviado com sucesso.'
             });
-            await new Promise(resolve => setTimeout(resolve, 100));
+            await new Promise(resolve => setTimeout(resolve, 100)); // Pausa entre requisições
         }
         
         res.status(200).json({
@@ -830,8 +831,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
 
     try {
-        // --- ETAPA 1: Inserção Rápida (Apenas o essencial) ---
-        // Insere o clique sem dados de geolocalização para ser mais rápido.
+        // ETAPA 1: Inserção Rápida
         const result = await sql`INSERT INTO clicks (
             seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
@@ -850,15 +850,12 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
         const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
         const db_click_id = `/start ${clean_click_id}`;
         
-        // Atualiza o registro com o ID do clique formatado.
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
 
-        // --- ETAPA 2: Resposta Imediata ---
-        // Envia a resposta para o cliente IMEDIATAMENTE. O redirecionamento ocorrerá agora.
+        // ETAPA 2: Resposta Imediata
         res.status(200).json({ status: 'success', click_id: clean_click_id });
 
-        // --- ETAPA 3: Tarefas em Segundo Plano (Não bloqueiam o usuário) ---
-        // Usamos uma função auto-executável para rodar as tarefas lentas.
+        // ETAPA 3: Tarefas em Segundo Plano
         (async () => {
             try {
                 // Tarefa 1: Geolocalização
@@ -868,7 +865,6 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
                     city = geo.data.city || city;
                     state = geo.data.regionName || state;
                 }
-                // Atualiza o clique com os dados de localização, sem afetar o usuário.
                 await sql`UPDATE clicks SET city = ${city}, state = ${state} WHERE id = ${click_record_id}`;
                 console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
 
@@ -876,8 +872,6 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
                 if (checkoutId) {
                     const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
                     const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
-                    
-                    // A função sendMetaEvent já é assíncrona, basta chamá-la aqui.
                     await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
                     console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
                 }
@@ -888,7 +882,6 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
 
     } catch (error) {
         console.error("Erro ao registrar clique:", error);
-        // Garante que uma resposta de erro seja enviada se a parte inicial falhar.
         if (!res.headersSent) {
             res.status(500).json({ message: 'Erro interno do servidor.' });
         }
