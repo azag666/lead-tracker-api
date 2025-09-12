@@ -126,9 +126,12 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         
         pixData = response.data;
         acquirer = "SyncPay";
+        
+        // --- CORREÇÃO APLICADA AQUI ---
+        // Ajustado para usar os nomes de campo corretos, que são `pix.code` e `pix.base64`
         return { 
-            qr_code_text: pixData.pixCopyPaste, 
-            qr_code_base64: pixData.pixQrCode, 
+            qr_code_text: pixData.pix.code, 
+            qr_code_base64: pixData.pix.base64, 
             transaction_id: pixData.transactionId, 
             acquirer, 
             provider 
@@ -844,7 +847,7 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     const { 
         pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
-        syncpay_client_id, syncpay_client_secret, // NOVO
+        syncpay_client_id, syncpay_client_secret,
         pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
     } = req.body;
     try {
@@ -854,8 +857,8 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
             cnpay_secret_key = ${cnpay_secret_key || null}, 
             oasyfy_public_key = ${oasyfy_public_key || null}, 
             oasyfy_secret_key = ${oasyfy_secret_key || null},
-            syncpay_client_id = ${syncpay_client_id || null}, -- NOVO
-            syncpay_client_secret = ${syncpay_client_secret || null}, -- NOVO
+            syncpay_client_id = ${syncpay_client_id || null},
+            syncpay_client_secret = ${syncpay_client_secret || null},
             pix_provider_primary = ${pix_provider_primary || 'pushinpay'},
             pix_provider_secondary = ${pix_provider_secondary || null},
             pix_provider_tertiary = ${pix_provider_tertiary || null}
@@ -1150,7 +1153,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 
         let providerStatus, customerData = {};
         try {
-            if (transaction.provider === 'syncpay') { // NOVO
+            if (transaction.provider === 'syncpay') {
                 const syncPayToken = await getSyncPayAuthToken(seller);
                 const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
                     headers: { 'Authorization': `Bearer ${syncPayToken}` }
