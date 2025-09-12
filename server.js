@@ -27,13 +27,17 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
 }
 let adminSubscription = null;
 
-// --- A FUNÇÃO getDbConnection() foi REMOVIDA para otimização ---
-
 // --- CONFIGURAÇÃO ---
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
+
+// NOVO: URL base da API da SyncPay
+const SYNCPAY_API_BASE_URL = 'https://api.syncpayments.com.br';
+
+// NOVO: Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
+const syncPayTokenCache = new Map();
 
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
@@ -69,7 +73,33 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
-// --- FUNÇÃO HELPER DE GERAÇÃO DE PIX ---
+// NOVO: Função para obter e gerenciar o token da SyncPay
+async function getSyncPayAuthToken(seller) {
+    const cachedToken = syncPayTokenCache.get(seller.id);
+    // Reutiliza o token se ele for válido por mais 60 segundos
+    if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
+        return cachedToken.accessToken;
+    }
+
+    if (!seller.syncpay_client_id || !seller.syncpay_client_secret) {
+        throw new Error('Credenciais da SyncPay não configuradas para este vendedor.');
+    }
+    
+    console.log(`[SyncPay] Solicitando novo token para o vendedor ID: ${seller.id}`);
+    const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/auth-token`, {
+        client_id: seller.syncpay_client_id,
+        client_secret: seller.syncpay_client_secret,
+    });
+
+    const { access_token, expires_in } = response.data;
+    const expiresAt = Date.now() + (expires_in * 1000);
+
+    syncPayTokenCache.set(seller.id, { accessToken: access_token, expiresAt });
+    return access_token;
+}
+
+
+// ALTERADO: Adicionado suporte para SyncPay
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
@@ -79,8 +109,32 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         document: "11111111111",
         phone: "11999999999"
     };
+    
+    if (provider === 'syncpay') {
+        const token = await getSyncPayAuthToken(seller);
+        const payload = {
+            amount: value_cents, // SyncPay já espera em centavos
+            payer: clientPayload
+        };
+        
+        // AVISO: A API da SyncPay, conforme a documentação, não parece suportar split de pagamento diretamente na criação do PIX.
+        // O split de 2.99% não será aplicado aqui.
 
-    if (provider === 'cnpay' || provider === 'oasyfy') {
+        const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        pixData = response.data;
+        acquirer = "SyncPay";
+        return { 
+            qr_code_text: pixData.pixCopyPaste, 
+            qr_code_base64: pixData.pixQrCode, 
+            transaction_id: pixData.transactionId, 
+            acquirer, 
+            provider 
+        };
+
+    } else if (provider === 'cnpay' || provider === 'oasyfy') {
         const isCnpay = provider === 'cnpay';
         const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
         const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
@@ -97,7 +151,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         };
 
         const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
-        if (apiKey !== ADMIN_API_KEY && commission > 0) {
+        if (apiKey !== ADMIN_API_KEY && commission > 0 && splitId) {
             payload.splits = [{ producerId: splitId, amount: commission }];
         }
 
@@ -114,7 +168,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         };
         
         const commission_cents = Math.floor(value_cents * 0.0299);
-        if (apiKey !== ADMIN_API_KEY && commission_cents > 0) {
+        if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && PUSHINPAY_SPLIT_ACCOUNT_ID) {
             payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
         }
 
@@ -519,7 +573,7 @@ app.post('/api/sellers/login', async (req, res) => {
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
@@ -790,6 +844,7 @@ app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
 app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
     const { 
         pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
+        syncpay_client_id, syncpay_client_secret, // NOVO
         pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
     } = req.body;
     try {
@@ -799,6 +854,8 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
             cnpay_secret_key = ${cnpay_secret_key || null}, 
             oasyfy_public_key = ${oasyfy_public_key || null}, 
             oasyfy_secret_key = ${oasyfy_secret_key || null},
+            syncpay_client_id = ${syncpay_client_id || null}, -- NOVO
+            syncpay_client_secret = ${syncpay_client_secret || null}, -- NOVO
             pix_provider_primary = ${pix_provider_primary || 'pushinpay'},
             pix_provider_secondary = ${pix_provider_secondary || null},
             pix_provider_tertiary = ${pix_provider_tertiary || null}
@@ -1093,7 +1150,14 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 
         let providerStatus, customerData = {};
         try {
-            if (transaction.provider === 'pushinpay') {
+            if (transaction.provider === 'syncpay') { // NOVO
+                const syncPayToken = await getSyncPayAuthToken(seller);
+                const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
+                    headers: { 'Authorization': `Bearer ${syncPayToken}` }
+                });
+                providerStatus = response.data.status;
+                customerData = response.data.payer;
+            } else if (transaction.provider === 'pushinpay') {
                 const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                 providerStatus = response.data.status;
                 customerData = { name: response.data.payer_name, document: response.data.payer_document };
@@ -1444,6 +1508,22 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
+
+// NOVO: Webhook para a SyncPay
+app.post('/api/webhook/syncpay', async (req, res) => {
+    const { transactionId, status, payer } = req.body;
+    console.log('[WEBHOOK SYNC PAY] Payload recebido:', req.body);
+    if (status === 'paid' || status === 'COMPLETED') {
+        try {
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'syncpay'`;
+            if (tx && tx.status !== 'paid') {
+                await handleSuccessfulPayment(tx.id, payer);
+            }
+        } catch (error) { console.error("Erro no webhook da SyncPay:", error); }
+    }
+    res.sendStatus(200);
+});
+
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     if (!sellerData.utmify_api_token) { return; }
     const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
@@ -1568,13 +1648,20 @@ async function checkPendingTransactions() {
         for (const tx of pendingTransactions) {
             try {
                 const [seller] = await sql`
-                    SELECT pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key
+                    SELECT *
                     FROM sellers s JOIN clicks c ON c.seller_id = s.id
                     WHERE c.id = ${tx.click_id_internal}`;
                 if (!seller) continue;
 
                 let providerStatus, customerData = {};
-                if (tx.provider === 'pushinpay') {
+                if (tx.provider === 'syncpay') {
+                    const syncPayToken = await getSyncPayAuthToken(seller);
+                    const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${tx.provider_transaction_id}`, {
+                        headers: { 'Authorization': `Bearer ${syncPayToken}` }
+                    });
+                    providerStatus = response.data.status;
+                    customerData = response.data.payer;
+                } else if (tx.provider === 'pushinpay') {
                     const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                     providerStatus = response.data.status;
                     customerData = { name: response.data.payer_name, document: response.data.payer_document };
@@ -1585,7 +1672,7 @@ async function checkPendingTransactions() {
 
                     if (!publicKey || !secretKey) continue;
 
-                    const apiUrl = isCnpay
+                    const apiUrl = isCnpay 
                         ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`
                         : `https://app.oasyfy.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`;
                     
