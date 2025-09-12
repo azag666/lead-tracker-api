@@ -851,77 +851,50 @@ app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
 });
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const sql = getDbConnection();
+    const apiKey = req.headers['x-api-key'];
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
-
-    if (!sellerApiKey || (!presselId && !checkoutId)) {
-        return res.status(400).json({ message: 'Dados insuficientes.' });
-    }
-
+    
+    if (!sellerApiKey || (!presselId && !checkoutId)) return res.status(400).json({ message: 'Dados insuficientes.' });
+    
     const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
-
+    let city = 'Desconhecida', state = 'Desconhecido';
     try {
-        // --- ETAPA 1: Inserção Rápida (Apenas o essencial) ---
-        // Insere o clique sem dados de geolocalização para ser mais rápido.
+        if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
+            const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
+            city = geo.data.city || city;
+            state = geo.data.regionName || state;
+        }
+    } catch (e) { console.error("Erro ao buscar geolocalização:", e.message); }
+    
+    try {
         const result = await sql`INSERT INTO clicks (
-            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, fbclid, fbp, fbc,
+            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, city, state, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
         ) 
         SELECT
-            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${fbclid}, ${fbp}, ${fbc},
+            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${city}, ${state}, ${fbclid}, ${fbp}, ${fbc},
             ${utm_source || null}, ${utm_campaign || null}, ${utm_medium || null}, ${utm_content || null}, ${utm_term || null}
         FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING *;`;
-
-        if (result.length === 0) {
-            return res.status(404).json({ message: 'API Key inválida.' });
-        }
-
+        
+        if (result.length === 0) return res.status(404).json({ message: 'API Key inválida.' });
+        
         const newClick = result[0];
         const click_record_id = newClick.id;
         const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
         const db_click_id = `/start ${clean_click_id}`;
-        
-        // Atualiza o registro com o ID do clique formatado.
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
 
-        // --- ETAPA 2: Resposta Imediata ---
-        // Envia a resposta para o cliente IMEDIATAMENTE. O redirecionamento ocorrerá agora.
+        if (checkoutId) {
+            const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
+            const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
+            
+            await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
+        }
+        
         res.status(200).json({ status: 'success', click_id: clean_click_id });
-
-        // --- ETAPA 3: Tarefas em Segundo Plano (Não bloqueiam o usuário) ---
-        // Usamos uma função auto-executável para rodar as tarefas lentas.
-        (async () => {
-            try {
-                // Tarefa 1: Geolocalização
-                let city = 'Desconhecida', state = 'Desconhecido';
-                if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
-                    const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
-                    city = geo.data.city || city;
-                    state = geo.data.regionName || state;
-                }
-                // Atualiza o clique com os dados de localização, sem afetar o usuário.
-                await sql`UPDATE clicks SET city = ${city}, state = ${state} WHERE id = ${click_record_id}`;
-                console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
-
-                // Tarefa 2: Envio de evento para a Meta
-                if (checkoutId) {
-                    const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
-                    const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
-                    
-                    // A função sendMetaEvent já é assíncrona, basta chamá-la aqui.
-                    await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
-                    console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
-                }
-            } catch (backgroundError) {
-                console.error("Erro em tarefa de segundo plano (registerClick):", backgroundError.message);
-            }
-        })();
-
     } catch (error) {
         console.error("Erro ao registrar clique:", error);
-        // Garante que uma resposta de erro seja enviada se a parte inicial falhar.
-        if (!res.headersSent) {
-            res.status(500).json({ message: 'Erro interno do servidor.' });
-        }
+        res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
 app.post('/api/click/info', logApiRequest, async (req, res) => {
