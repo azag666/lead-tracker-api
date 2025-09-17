@@ -126,12 +126,12 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         
         // --- CORREÇÃO FINAL APLICADA AQUI ---
         // A resposta da SyncPay não tem um objeto `pix`. Os campos são diretos.
-        return { 
-        qr_code_text: pixData.qr_code, 
-        qr_code_base64: pixData.qr_code_base64, 
-        transaction_id: pixData.transactionId, 
-        acquirer, 
-        provider 
+      return { 
+       qr_code_text: pixData.pix_code, 
+       qr_code_base64: null, // A resposta da API não inclui o QR Code em base64.
+       transaction_id: pixData.identifier, 
+       acquirer, 
+       provider 
     };
 
     } else if (provider === 'cnpay' || provider === 'oasyfy') {
