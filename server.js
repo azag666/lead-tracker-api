@@ -1685,6 +1685,6 @@ async function checkPendingTransactions() {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
-setInterval(checkPendingTransactions, 30000);
+setInterval(checkPendingTransactions, 180000);
 
 module.exports = app;
