@@ -98,8 +98,7 @@ async function getSyncPayAuthToken(seller) {
     return access_token;
 }
 
-
-// ALTERADO: Adicionado suporte para SyncPay
+// ALTERADO: Adicionado suporte para SyncPay com a lógica de SPLIT correta
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
@@ -113,9 +112,25 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     if (provider === 'syncpay') {
         const token = await getSyncPayAuthToken(seller);
         const payload = {
-            amount: value_cents, // SyncPay já espera em centavos
+            // CORREÇÃO 1: A API da SyncPay espera o valor em Reais, não em centavos.
+            amount: value_cents / 100,
             payer: clientPayload
         };
+        
+        // --- LÓGICA DE SPLIT CORRIGIDA CONFORME A DOCUMENTAÇÃO ---
+        const commission_percentage = 2.99; // Sua taxa de comissão
+        
+        if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
+            payload.split = [
+                {
+                    // A API espera um valor inteiro para a porcentagem, arredondamos para 3%.
+                    percentage: Math.round(commission_percentage), 
+                    // O user_id é o Client ID (público) da conta que recebe a comissão.
+                    user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
+                }
+            ];
+        }
+        // --- FIM DA LÓGICA DE SPLIT ---
         
         const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
             headers: { 'Authorization': `Bearer ${token}` }
@@ -124,17 +139,16 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         pixData = response.data;
         acquirer = "SyncPay";
         
-        // --- CORREÇÃO FINAL APLICADA AQUI ---
-        // A resposta da SyncPay não tem um objeto `pix`. Os campos são diretos.
-      return { 
-       qr_code_text: pixData.pix_code, 
-       qr_code_base64: null, // A resposta da API não inclui o QR Code em base64.
-       transaction_id: pixData.identifier, 
-       acquirer, 
-       provider 
-    };
+        return { 
+            qr_code_text: pixData.pix_code, 
+            qr_code_base64: null, 
+            transaction_id: pixData.identifier, 
+            acquirer, 
+            provider 
+        };
 
     } else if (provider === 'cnpay' || provider === 'oasyfy') {
+        // ... (o código para cnpay e oasyfy continua o mesmo)
         const isCnpay = provider === 'cnpay';
         const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
         const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
@@ -161,6 +175,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
 
     } else { // Padrão é PushinPay
+        // ... (o código para pushinpay continua o mesmo)
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
         const payload = {
             value: value_cents,
@@ -178,7 +193,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer, provider: 'pushinpay' };
     }
 }
-
 // --- FUNÇÃO PARA VERIFICAR E CONCEDER CONQUISTAS ---
 async function checkAndAwardAchievements(seller_id) {
     try {
