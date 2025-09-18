@@ -102,11 +102,11 @@ async function getSyncPayAuthToken(seller) {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
-    const clientPayload = { 
-        name: "Cliente Teste", 
-        email: "cliente@email.com", 
-        document: "11111111111",
-        phone: "11999999999"
+    const clientPayload = {
+    name: "Cliente Padrão",
+    email: "gabriel@gmail.com",
+    document: "21376710773", // CPF sem pontos ou traços
+    phone: "27995310379" // Telefone sem o +55 ou outros caracteres
     };
     
     if (provider === 'syncpay') {
