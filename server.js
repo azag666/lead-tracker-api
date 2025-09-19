@@ -584,10 +584,12 @@ app.post('/api/sellers/login', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
+// ATUALIZADO: Endpoint de dados do Dashboard
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
+        // Query de settings agora não busca mais o token da utmify
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
@@ -602,10 +604,16 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
             LEFT JOIN ( SELECT checkout_id, array_agg(pixel_config_id) as pixel_ids FROM checkout_pixels GROUP BY checkout_id ) px ON c.id = px.checkout_id
             WHERE c.seller_id = ${sellerId} ORDER BY c.created_at DESC`;
 
-        const [settingsResult, pixels, pressels, bots, checkouts] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise]);
+        // NOVA QUERY PARA BUSCAR AS INTEGRAÇÕES
+        const utmifyIntegrationsPromise = sql`SELECT id, account_name FROM utmify_integrations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
+
+        const [settingsResult, pixels, pressels, bots, checkouts, utmifyIntegrations] = await Promise.all([
+            settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise, utmifyIntegrationsPromise
+        ]);
         
         const settings = settingsResult[0] || {};
-        res.json({ settings, pixels, pressels, bots, checkouts });
+        // Adiciona as integrações ao objeto de resposta
+        res.json({ settings, pixels, pressels, bots, checkouts, utmifyIntegrations });
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
         res.status(500).json({ message: 'Erro ao buscar dados.' });
@@ -772,8 +780,10 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
     }
 });
+// ATUALIZADO: Endpoint de criação de Pressel
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
-    const { name, bot_id, white_page_url, pixel_ids } = req.body;
+    // Adiciona utmify_integration_id à desestruturação
+    const { name, bot_id, white_page_url, pixel_ids, utmify_integration_id } = req.body;
     if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     
     try {
@@ -788,7 +798,12 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
 
         await sql`BEGIN`;
         try {
-            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
+            // Adiciona utmify_integration_id ao INSERT. Usa null se não for fornecido.
+            const [newPressel] = await sql`
+                INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url, utmify_integration_id) 
+                VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${utmify_integration_id || null}) 
+                RETURNING *;
+            `;
             
             for (const pixelId of numeric_pixel_ids) {
                 await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
@@ -880,18 +895,54 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
-app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
-    const { utmify_api_token } = req.body;
+// NOVO: Endpoints para gerenciar integrações Utmify
+app.get('/api/integrations/utmify', authenticateJwt, async (req, res) => {
     try {
-        await sql`UPDATE sellers SET 
-            utmify_api_token = ${utmify_api_token || null}
-            WHERE id = ${req.user.id}`;
-        res.status(200).json({ message: 'Token da Utmify salvo com sucesso.' });
+        const integrations = await sql`
+            SELECT id, account_name, created_at 
+            FROM utmify_integrations 
+            WHERE seller_id = ${req.user.id} 
+            ORDER BY created_at DESC
+        `;
+        res.status(200).json(integrations);
     } catch (error) {
-        console.error("Erro ao salvar token da Utmify:", error);
-        res.status(500).json({ message: 'Erro ao salvar as configurações.' });
+        console.error("Erro ao buscar integrações Utmify:", error);
+        res.status(500).json({ message: 'Erro ao buscar integrações.' });
     }
 });
+
+app.post('/api/integrations/utmify', authenticateJwt, async (req, res) => {
+    const { account_name, api_token } = req.body;
+    if (!account_name || !api_token) {
+        return res.status(400).json({ message: 'Nome da conta e token da API são obrigatórios.' });
+    }
+    try {
+        const [newIntegration] = await sql`
+            INSERT INTO utmify_integrations (seller_id, account_name, api_token) 
+            VALUES (${req.user.id}, ${account_name}, ${api_token}) 
+            RETURNING id, account_name, created_at
+        `;
+        res.status(201).json(newIntegration);
+    } catch (error) {
+        console.error("Erro ao adicionar integração Utmify:", error);
+        res.status(500).json({ message: 'Erro ao salvar integração.' });
+    }
+});
+
+app.delete('/api/integrations/utmify/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await sql`
+            DELETE FROM utmify_integrations 
+            WHERE id = ${id} AND seller_id = ${req.user.id}
+        `;
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao excluir integração Utmify:", error);
+        res.status(500).json({ message: 'Erro ao excluir integração.' });
+    }
+});
+
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
 
@@ -1522,37 +1573,68 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
+// ATUALIZADA: Função de envio de eventos para a Utmify
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
-    if (!sellerData.utmify_api_token) { return; }
-    const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
-    const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
-    const payload = {
-        orderId: pixData.provider_transaction_id, platform: "HotTrack", paymentMethod: 'pix',
-        status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
-        customer: {
-            name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com",
-            phone: customerData?.phone || null, document: customerData?.document || null,
-        },
-        products: [{
-            id: productData?.id || "default_product", name: productData?.name || "Produto Digital",
-            planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100)
-        }],
-        trackingParameters: {
-            src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign,
-            utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term
-        },
-        commission: {
-            totalPriceInCents: Math.round(pixData.pix_value * 100),
-            gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299),
-            userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299))
-        },
-        isTest: false
-    };
     try {
+        // Passo 1: Descobrir qual token usar com base no clique
+        let integrationId = null;
+        if (clickData.pressel_id) {
+            const [pressel] = await sql`SELECT utmify_integration_id FROM pressels WHERE id = ${clickData.pressel_id}`;
+            if (pressel) {
+                integrationId = pressel.utmify_integration_id;
+            }
+        } 
+        // Adicionar lógica para checkouts aqui se necessário no futuro
+
+        if (!integrationId) {
+            // Se não houver integração vinculada, simplesmente não faz nada.
+            return;
+        }
+
+        const [integration] = await sql`
+            SELECT api_token FROM utmify_integrations 
+            WHERE id = ${integrationId} AND seller_id = ${sellerData.id}
+        `;
+
+        if (!integration || !integration.api_token) {
+            console.error(`Token da Utmify não encontrado para a integração ID ${integrationId}.`);
+            return;
+        }
+
+        const utmifyApiToken = integration.api_token;
+
+        // Passo 2: Montar o payload (lógica existente, sem alterações)
+        const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
+        const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
+        const payload = {
+            orderId: pixData.provider_transaction_id, platform: "HotTrack", paymentMethod: 'pix',
+            status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
+            customer: {
+                name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com",
+                phone: customerData?.phone || null, document: customerData?.document || null,
+            },
+            products: [{
+                id: productData?.id || "default_product", name: productData?.name || "Produto Digital",
+                planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100)
+            }],
+            trackingParameters: {
+                src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign,
+                utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term
+            },
+            commission: {
+                totalPriceInCents: Math.round(pixData.pix_value * 100),
+                gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299),
+                userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299))
+            },
+            isTest: false
+        };
+
+        // Passo 3: Enviar o evento com o token correto
         await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
-            headers: { 'x-api-token': sellerData.utmify_api_token }
+            headers: { 'x-api-token': utmifyApiToken }
         });
-        console.log(`Evento '${status}' do pedido ${payload.orderId} enviado para Utmify.`);
+        console.log(`Evento '${status}' do pedido ${payload.orderId} enviado para Utmify (Integração ID: ${integrationId}).`);
+
     } catch (error) {
         console.error(`Erro ao enviar evento '${status}' para a Utmify:`, error.response?.data || error.message);
     }
