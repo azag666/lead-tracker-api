@@ -538,6 +538,56 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     }
 });
 
+// NOVO ENDPOINT: Ferramenta para reenviar eventos Utmify
+app.post('/api/admin/resend-utmify-events', authenticateAdmin, async (req, res) => {
+    const { pressel_id, utmify_integration_id } = req.body;
+
+    if (!pressel_id || !utmify_integration_id) {
+        return res.status(400).json({ message: 'pressel_id e utmify_integration_id são obrigatórios.' });
+    }
+
+    try {
+        // Passo 1: Vincular a pressel à conta Utmify permanentemente
+        await sql`UPDATE pressels SET utmify_integration_id = ${utmify_integration_id} WHERE id = ${pressel_id}`;
+        console.log(`[ADMIN-UTMIFY] Pressel ${pressel_id} agora está vinculada à integração ${utmify_integration_id}.`);
+
+        // Passo 2: Encontrar todas as transações pagas daquela pressel
+        const paidTransactions = await sql`
+            SELECT pt.*, c.*
+            FROM pix_transactions pt
+            JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE c.pressel_id = ${pressel_id} AND pt.status = 'paid';
+        `;
+        
+        if (paidTransactions.length === 0) {
+            return res.status(200).json({ message: 'Associação atualizada. Nenhuma transação paga pendente encontrada para esta pressel.' });
+        }
+
+        console.log(`[ADMIN-UTMIFY] Encontradas ${paidTransactions.length} transações pagas para reenviar.`);
+
+        const [seller] = await sql`SELECT * FROM sellers s JOIN pressels p ON s.id = p.seller_id WHERE p.id = ${pressel_id}`;
+        if (!seller) {
+            throw new Error('Vendedor associado à pressel não encontrado.');
+        }
+
+        // Passo 3: Reenviar o evento para cada transação
+        let sentCount = 0;
+        for (const transaction of paidTransactions) {
+            await sendEventToUtmify('paid', transaction, transaction, seller, null, null);
+            sentCount++;
+            await new Promise(resolve => setTimeout(resolve, 200)); // Pequena pausa para evitar sobrecarga
+        }
+
+        res.status(200).json({ 
+            message: `Associação atualizada com sucesso. ${sentCount} eventos de pagamento foram reenviados para a Utmify.`
+        });
+
+    } catch (error) {
+        console.error("Erro na ferramenta de reenvio da Utmify:", error);
+        res.status(500).json({ message: 'Erro interno ao processar o reenvio.', error: error.message });
+    }
+});
+
 
 // --- ROTAS GERAIS DE USUÁRIO ---
 app.post('/api/sellers/register', async (req, res) => {
@@ -1161,7 +1211,6 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
             try {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
                 
-                // **CORREÇÃO IMPORTANTE**: Salva o internal_identifier no banco de dados
                 const [transaction] = await sql`
                     INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, internal_identifier, pix_id) 
                     VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.internal_identifier}, ${pixResult.transaction_id}) 
@@ -1263,7 +1312,6 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
     res.sendStatus(200);
 });
 app.post('/api/webhook/cnpay', async (req, res) => {
-    // **CORREÇÃO IMPORTANTE**: Usar o 'identifier' do webhook
     const { identifier, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
@@ -1280,7 +1328,6 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     res.sendStatus(200);
 });
 app.post('/api/webhook/oasyfy', async (req, res) => {
-    // **CORREÇÃO IMPORTANTE**: Usar o 'identifier' do webhook
     const { identifier, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
