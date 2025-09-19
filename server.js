@@ -33,10 +33,10 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// URL base da API da SyncPay
+// NOVO: URL base da API da SyncPay
 const SYNCPAY_API_BASE_URL = 'https://api.syncpayments.com.br';
 
-// Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
+// NOVO: Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
 const syncPayTokenCache = new Map();
 
 
@@ -73,11 +73,10 @@ async function logApiRequest(req, res, next) {
     next();
 }
 
-// --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
-
-// Função para obter e gerenciar o token da SyncPay
+// NOVO: Função para obter e gerenciar o token da SyncPay
 async function getSyncPayAuthToken(seller) {
     const cachedToken = syncPayTokenCache.get(seller.id);
+    // Reutiliza o token se ele for válido por mais 60 segundos
     if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
         return cachedToken.accessToken;
     }
@@ -99,28 +98,39 @@ async function getSyncPayAuthToken(seller) {
     return access_token;
 }
 
-// Função para gerar PIX nos diferentes provedores
+// ALTERADO: Adicionado suporte para SyncPay com a lógica de SPLIT correta
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
     const clientPayload = {
-        name: "Cliente Padrão",
-        email: "gabriel@gmail.com",
-        document: "21376710773",
-        phone: "27995310379"
+    name: "Cliente Padrão",
+    email: "gabriel@gmail.com",
+    document: "21376710773", // CPF sem pontos ou traços
+    phone: "27995310379" // Telefone sem o +55 ou outros caracteres
     };
     
     if (provider === 'syncpay') {
         const token = await getSyncPayAuthToken(seller);
-        const payload = { amount: value_cents / 100, payer: clientPayload };
-        const commission_percentage = 2.99;
+        const payload = {
+            // CORREÇÃO 1: A API da SyncPay espera o valor em Reais, não em centavos.
+            amount: value_cents / 100,
+            payer: clientPayload
+        };
+        
+        // --- LÓGICA DE SPLIT CORRIGIDA CONFORME A DOCUMENTAÇÃO ---
+        const commission_percentage = 2.99; // Sua taxa de comissão
         
         if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
-            payload.split = [{
-                percentage: Math.round(commission_percentage), 
-                user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
-            }];
+            payload.split = [
+                {
+                    // A API espera um valor inteiro para a porcentagem, arredondamos para 3%.
+                    percentage: Math.round(commission_percentage), 
+                    // O user_id é o Client ID (público) da conta que recebe a comissão.
+                    user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
+                }
+            ];
         }
+        // --- FIM DA LÓGICA DE SPLIT ---
         
         const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
             headers: { 'Authorization': `Bearer ${token}` }
@@ -138,6 +148,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         };
 
     } else if (provider === 'cnpay' || provider === 'oasyfy') {
+        // ... (o código para cnpay e oasyfy continua o mesmo)
         const isCnpay = provider === 'cnpay';
         const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
         const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
@@ -164,6 +175,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
 
     } else { // Padrão é PushinPay
+        // ... (o código para pushinpay continua o mesmo)
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
         const payload = {
             value: value_cents,
@@ -181,8 +193,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer, provider: 'pushinpay' };
     }
 }
-
-// Função para verificar e conceder conquistas
+// --- FUNÇÃO PARA VERIFICAR E CONCEDER CONQUISTAS ---
 async function checkAndAwardAchievements(seller_id) {
     try {
         const [totalRevenueResult] = await sql`
@@ -212,16 +223,11 @@ async function checkAndAwardAchievements(seller_id) {
 }
 
 
-// Função central para processar pagamentos bem-sucedidos
+// --- FUNÇÃO PARA CENTRALIZAR EVENTOS DE CONVERSÃO (COM TRATAMENTO DE ERRO DE NOTIFICAÇÃO) ---
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
-        if (!transaction) { 
-            console.log(`[handleSuccessfulPayment] Transação ${transaction_id} já processada ou não encontrada.`);
-            return; 
-        }
-
-        console.log(`[handleSuccessfulPayment] Processando pagamento para transação ${transaction_id}.`);
+        if (!transaction) { return; }
 
         if (adminSubscription && webpush) {
             const payload = JSON.stringify({
@@ -248,11 +254,9 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
             await checkAndAwardAchievements(seller.id); 
-        } else {
-            console.error(`[handleSuccessfulPayment] ERRO: Não foi possível encontrar dados do clique ou vendedor para a transação ${transaction_id}`);
         }
     } catch(error) {
-        console.error(`[handleSuccessfulPayment] ERRO CRÍTICO ao processar pagamento da transação ${transaction_id}:`, error);
+        console.error("Erro ao lidar com pagamento bem-sucedido:", error);
     }
 }
 
@@ -266,6 +270,8 @@ function authenticateAdmin(req, res, next) {
     next();
 }
 
+
+// --- FUNCIONALIDADE DE REENVIO DE EVENTOS (PIXEL WARMING) ---
 async function sendHistoricalMetaEvent(eventName, clickData, transactionData, targetPixel) {
     let payload_sent = null;
     try {
@@ -322,7 +328,7 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
     const { 
         target_pixel_id, target_meta_api_token, seller_id, 
-        start_date, end_date, page = 1, limit = 50
+        start_date, end_date, page = 1, limit = 50 // Adiciona paginação
     } = req.body;
 
     if (!target_pixel_id || !target_meta_api_token || !start_date || !end_date) {
@@ -358,6 +364,7 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
             });
         }
 
+        // Paginação do lote
         const totalEvents = allPaidTransactions.length;
         const totalPages = Math.ceil(totalEvents / limit);
         const offset = (page - 1) * limit;
@@ -379,7 +386,7 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
                 payload_sent: result.payload,
                 meta_response: result.error || 'Enviado com sucesso.'
             });
-            await new Promise(resolve => setTimeout(resolve, 100));
+            await new Promise(resolve => setTimeout(resolve, 100)); // Pausa entre requisições
         }
         
         res.status(200).json({
@@ -396,6 +403,8 @@ app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
     }
 });
 
+
+// --- ROTAS PARA NOTIFICAÇÕES ---
 app.get('/api/admin/vapidPublicKey', authenticateAdmin, (req, res) => {
     if (!process.env.VAPID_PUBLIC_KEY) {
         return res.status(500).send('VAPID Public Key não configurada no servidor.');
@@ -409,6 +418,7 @@ app.post('/api/admin/save-subscription', authenticateAdmin, (req, res) => {
     res.status(201).json({});
 });
 
+// --- ROTAS GERAIS (CONTINUAÇÃO) ---
 app.get('/api/admin/dashboard', authenticateAdmin, async (req, res) => {
     try {
         const totalSellers = await sql`SELECT COUNT(*) FROM sellers;`;
@@ -519,9 +529,6 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
     }
 });
-
-
-// --- ROTAS GERAIS DE USUÁRIO ---
 app.post('/api/sellers/register', async (req, res) => {
     const { name, email, password } = req.body;
 
@@ -546,7 +553,6 @@ app.post('/api/sellers/register', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
 app.post('/api/sellers/login', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
@@ -578,11 +584,10 @@ app.post('/api/sellers/login', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary FROM sellers WHERE id = ${sellerId}`;
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, utmify_api_token FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
@@ -596,14 +601,11 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
             FROM checkouts c
             LEFT JOIN ( SELECT checkout_id, array_agg(pixel_config_id) as pixel_ids FROM checkout_pixels GROUP BY checkout_id ) px ON c.id = px.checkout_id
             WHERE c.seller_id = ${sellerId} ORDER BY c.created_at DESC`;
-        const utmifyIntegrationsPromise = sql`SELECT id, account_name FROM utmify_integrations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
 
-        const [settingsResult, pixels, pressels, bots, checkouts, utmifyIntegrations] = await Promise.all([
-            settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise, utmifyIntegrationsPromise
-        ]);
+        const [settingsResult, pixels, pressels, bots, checkouts] = await Promise.all([settingsPromise, pixelsPromise, presselsPromise, botsPromise, checkoutsPromise]);
         
         const settings = settingsResult[0] || {};
-        res.json({ settings, pixels, pressels, bots, checkouts, utmifyIntegrations });
+        res.json({ settings, pixels, pressels, bots, checkouts });
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
         res.status(500).json({ message: 'Erro ao buscar dados.' });
@@ -771,7 +773,7 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
-    const { name, bot_id, white_page_url, pixel_ids, utmify_integration_id } = req.body;
+    const { name, bot_id, white_page_url, pixel_ids } = req.body;
     if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     
     try {
@@ -786,11 +788,7 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
 
         await sql`BEGIN`;
         try {
-            const [newPressel] = await sql`
-                INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url, utmify_integration_id) 
-                VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${utmify_integration_id || null}) 
-                RETURNING *;
-            `;
+            const [newPressel] = await sql`INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url) VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}) RETURNING *;`;
             
             for (const pixelId of numeric_pixel_ids) {
                 await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
@@ -882,48 +880,16 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
-app.get('/api/integrations/utmify', authenticateJwt, async (req, res) => {
+app.post('/api/settings/utmify', authenticateJwt, async (req, res) => {
+    const { utmify_api_token } = req.body;
     try {
-        const integrations = await sql`
-            SELECT id, account_name, created_at 
-            FROM utmify_integrations 
-            WHERE seller_id = ${req.user.id} 
-            ORDER BY created_at DESC
-        `;
-        res.status(200).json(integrations);
+        await sql`UPDATE sellers SET 
+            utmify_api_token = ${utmify_api_token || null}
+            WHERE id = ${req.user.id}`;
+        res.status(200).json({ message: 'Token da Utmify salvo com sucesso.' });
     } catch (error) {
-        console.error("Erro ao buscar integrações Utmify:", error);
-        res.status(500).json({ message: 'Erro ao buscar integrações.' });
-    }
-});
-app.post('/api/integrations/utmify', authenticateJwt, async (req, res) => {
-    const { account_name, api_token } = req.body;
-    if (!account_name || !api_token) {
-        return res.status(400).json({ message: 'Nome da conta e token da API são obrigatórios.' });
-    }
-    try {
-        const [newIntegration] = await sql`
-            INSERT INTO utmify_integrations (seller_id, account_name, api_token) 
-            VALUES (${req.user.id}, ${account_name}, ${api_token}) 
-            RETURNING id, account_name, created_at
-        `;
-        res.status(201).json(newIntegration);
-    } catch (error) {
-        console.error("Erro ao adicionar integração Utmify:", error);
-        res.status(500).json({ message: 'Erro ao salvar integração.' });
-    }
-});
-app.delete('/api/integrations/utmify/:id', authenticateJwt, async (req, res) => {
-    const { id } = req.params;
-    try {
-        await sql`
-            DELETE FROM utmify_integrations 
-            WHERE id = ${id} AND seller_id = ${req.user.id}
-        `;
-        res.status(204).send();
-    } catch (error) {
-        console.error("Erro ao excluir integração Utmify:", error);
-        res.status(500).json({ message: 'Erro ao excluir integração.' });
+        console.error("Erro ao salvar token da Utmify:", error);
+        res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
 app.post('/api/registerClick', logApiRequest, async (req, res) => {
@@ -936,6 +902,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
     const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
 
     try {
+        // ETAPA 1: Inserção Rápida
         const result = await sql`INSERT INTO clicks (
             seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, fbclid, fbp, fbc,
             utm_source, utm_campaign, utm_medium, utm_content, utm_term
@@ -956,10 +923,13 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
         
         await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
 
+        // ETAPA 2: Resposta Imediata
         res.status(200).json({ status: 'success', click_id: clean_click_id });
 
+        // ETAPA 3: Tarefas em Segundo Plano
         (async () => {
             try {
+                // Tarefa 1: Geolocalização
                 let city = 'Desconhecida', state = 'Desconhecido';
                 if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
                     const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
@@ -969,6 +939,7 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
                 await sql`UPDATE clicks SET city = ${city}, state = ${state} WHERE id = ${click_record_id}`;
                 console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
 
+                // Tarefa 2: Envio de evento para a Meta
                 if (checkoutId) {
                     const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
                     const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
@@ -1068,11 +1039,11 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const [
                totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
                clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
-        ] = await Promise.all([
+    ] = await Promise.all([
               totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
               clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
               deviceOSQuery
-        ]);
+   ]);
 
         const totalClicks = totalClicksResult[0].count;
         const totalPixGenerated = pixGeneratedResult[0].total;
@@ -1187,18 +1158,13 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         if (!transaction) {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
         }
-        
         if (transaction.status === 'paid') {
             return res.status(200).json({ status: 'paid' });
-        }
-        
-        if (transaction.provider === 'oasyfy' || transaction.provider === 'cnpay') {
-            return res.status(200).json({ status: 'pending', message: 'Aguardando confirmação via webhook.' });
         }
 
         let providerStatus, customerData = {};
         try {
-            if (transaction.provider === 'syncpay') {
+            if (transaction.provider === 'syncpay') { // NOVO
                 const syncPayToken = await getSyncPayAuthToken(seller);
                 const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
                     headers: { 'Authorization': `Bearer ${syncPayToken}` }
@@ -1209,6 +1175,29 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
                 const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                 providerStatus = response.data.status;
                 customerData = { name: response.data.payer_name, document: response.data.payer_document };
+            } else if (transaction.provider === 'cnpay' || transaction.provider === 'oasyfy') {
+                const isCnpay = transaction.provider === 'cnpay';
+                const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+                const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+
+                if (!publicKey || !secretKey) {
+                    console.warn(`Credenciais para ${transaction.provider.toUpperCase()} não configuradas para o vendedor ${seller.id}.`);
+                    return res.status(200).json({ status: 'pending' });
+                }
+
+                const apiUrl = isCnpay 
+                    ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${transaction.provider_transaction_id}`
+                    : `https://app.oasyfy.com/api/v1/gateway/transactions?id=${transaction.provider_transaction_id}`;
+
+                const response = await axios.get(apiUrl, { 
+                    headers: { 
+                        'x-public-key': publicKey, 
+                        'x-secret-key': secretKey 
+                    } 
+                });
+                
+                providerStatus = response.data.status;
+                customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
             }
         } catch (providerError) {
              console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
@@ -1525,71 +1514,47 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
-            console.log(`[Webhook Oasy.fy] Recebido pagamento para transação: ${transactionId}`);
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
-            
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
-            } else {
-                console.log(`[Webhook Oasy.fy] Transação ${transactionId} ignorada (já paga ou não encontrada).`);
             }
-        } catch (error) { 
-            console.error("[Webhook Oasy.fy] ERRO:", error); 
-        }
+        } catch (error) { console.error("Erro no webhook da Oasy.fy:", error); }
     }
     res.sendStatus(200);
 });
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
-    console.log(`[Utmify] Iniciando envio de evento '${status}' para o clique ID: ${clickData.id}`);
+    if (!sellerData.utmify_api_token) { return; }
+    const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
+    const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
+    const payload = {
+        orderId: pixData.provider_transaction_id, platform: "HotTrack", paymentMethod: 'pix',
+        status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
+        customer: {
+            name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com",
+            phone: customerData?.phone || null, document: customerData?.document || null,
+        },
+        products: [{
+            id: productData?.id || "default_product", name: productData?.name || "Produto Digital",
+            planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100)
+        }],
+        trackingParameters: {
+            src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign,
+            utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term
+        },
+        commission: {
+            totalPriceInCents: Math.round(pixData.pix_value * 100),
+            gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299),
+            userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299))
+        },
+        isTest: false
+    };
     try {
-        let integrationId = null;
-
-        if (clickData.pressel_id) {
-            console.log(`[Utmify] Clique originado da Pressel ID: ${clickData.pressel_id}`);
-            const [pressel] = await sql`SELECT utmify_integration_id FROM pressels WHERE id = ${clickData.pressel_id}`;
-            if (pressel) {
-                integrationId = pressel.utmify_integration_id;
-            }
-        } else if (clickData.checkout_id) {
-            console.log(`[Utmify] Clique originado do Checkout ID: ${clickData.checkout_id}. Lógica de associação não implementada para checkouts.`);
-        }
-
-        if (!integrationId) {
-            console.log(`[Utmify] Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}. Abortando envio.`);
-            return;
-        }
-
-        console.log(`[Utmify] Integração vinculada ID: ${integrationId}. Buscando token...`);
-        const [integration] = await sql`
-            SELECT api_token FROM utmify_integrations 
-            WHERE id = ${integrationId} AND seller_id = ${sellerData.id}
-        `;
-
-        if (!integration || !integration.api_token) {
-            console.error(`[Utmify] ERRO: Token não encontrado para a integração ID ${integrationId} do vendedor ${sellerData.id}.`);
-            return;
-        }
-
-        const utmifyApiToken = integration.api_token;
-        console.log(`[Utmify] Token encontrado. Montando payload...`);
-        
-        const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
-        const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
-        const payload = {
-            orderId: pixData.provider_transaction_id, platform: "HotTrack", paymentMethod: 'pix',
-            status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
-            customer: { name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com", phone: customerData?.phone || null, document: customerData?.document || null, },
-            products: [{ id: productData?.id || "default_product", name: productData?.name || "Produto Digital", planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100) }],
-            trackingParameters: { src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign, utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term },
-            commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299)) },
-            isTest: false
-        };
-
-        await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, { headers: { 'x-api-token': utmifyApiToken } });
-        console.log(`[Utmify] SUCESSO: Evento '${status}' do pedido ${payload.orderId} enviado para a conta Utmify (Integração ID: ${integrationId}).`);
-
+        await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
+            headers: { 'x-api-token': sellerData.utmify_api_token }
+        });
+        console.log(`Evento '${status}' do pedido ${payload.orderId} enviado para Utmify.`);
     } catch (error) {
-        console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
+        console.error(`Erro ao enviar evento '${status}' para a Utmify:`, error.response?.data || error.message);
     }
 }
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
@@ -1679,10 +1644,6 @@ async function checkPendingTransactions() {
         if (pendingTransactions.length === 0) return;
         
         for (const tx of pendingTransactions) {
-            if (tx.provider === 'oasyfy' || tx.provider === 'cnpay') {
-                continue;
-            }
-
             try {
                 const [seller] = await sql`
                     SELECT *
@@ -1693,13 +1654,35 @@ async function checkPendingTransactions() {
                 let providerStatus, customerData = {};
                 if (tx.provider === 'syncpay') {
                     const syncPayToken = await getSyncPayAuthToken(seller);
-                    const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${tx.provider_transaction_id}`, { headers: { 'Authorization': `Bearer ${syncPayToken}` } });
+                    const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${tx.provider_transaction_id}`, {
+                        headers: { 'Authorization': `Bearer ${syncPayToken}` }
+                    });
                     providerStatus = response.data.status;
                     customerData = response.data.payer;
                 } else if (tx.provider === 'pushinpay') {
                     const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${tx.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
                     providerStatus = response.data.status;
                     customerData = { name: response.data.payer_name, document: response.data.payer_document };
+                } else if (tx.provider === 'cnpay' || tx.provider === 'oasyfy') {
+                    const isCnpay = tx.provider === 'cnpay';
+                    const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
+                    const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
+
+                    if (!publicKey || !secretKey) continue;
+
+                    const apiUrl = isCnpay 
+                        ? `https://painel.appcnpay.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`
+                        : `https://app.oasyfy.com/api/v1/gateway/transactions?id=${tx.provider_transaction_id}`;
+                    
+                    const response = await axios.get(apiUrl, {
+                        headers: {
+                            'x-public-key': publicKey,
+                            'x-secret-key': secretKey
+                        }
+                    });
+
+                    providerStatus = response.data.status;
+                    customerData = { name: response.data.customer?.name, document: response.data.customer?.taxID?.taxID };
                 }
                 
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
@@ -1707,7 +1690,7 @@ async function checkPendingTransactions() {
                 }
             } catch (error) {
                 if (!error.response || error.response.status !== 404) {
-                    console.error(`Erro ao verificar transação ${tx.id} (${tx.provider}):`, error.response?.data || error.message);
+                    console.error(`Erro ao verificar transação ${tx.id}:`, error.response?.data || error.message);
                 }
             }
             await new Promise(resolve => setTimeout(resolve, 200)); 
@@ -1716,7 +1699,6 @@ async function checkPendingTransactions() {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
-
-// setInterval(checkPendingTransactions, 180000); 
+//setInterval(checkPendingTransactions, 180000);
 
 module.exports = app;
