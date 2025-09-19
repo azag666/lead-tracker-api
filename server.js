@@ -584,11 +584,10 @@ app.post('/api/sellers/login', async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
-// ATUALIZADO: Endpoint de dados do Dashboard
+
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        // Query de settings agora não busca mais o token da utmify
         const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
@@ -603,8 +602,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
             FROM checkouts c
             LEFT JOIN ( SELECT checkout_id, array_agg(pixel_config_id) as pixel_ids FROM checkout_pixels GROUP BY checkout_id ) px ON c.id = px.checkout_id
             WHERE c.seller_id = ${sellerId} ORDER BY c.created_at DESC`;
-
-        // NOVA QUERY PARA BUSCAR AS INTEGRAÇÕES
         const utmifyIntegrationsPromise = sql`SELECT id, account_name FROM utmify_integrations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
 
         const [settingsResult, pixels, pressels, bots, checkouts, utmifyIntegrations] = await Promise.all([
@@ -612,7 +609,6 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         ]);
         
         const settings = settingsResult[0] || {};
-        // Adiciona as integrações ao objeto de resposta
         res.json({ settings, pixels, pressels, bots, checkouts, utmifyIntegrations });
     } catch (error) {
         console.error("Erro ao buscar dados do dashboard:", error);
@@ -780,9 +776,8 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
     }
 });
-// ATUALIZADO: Endpoint de criação de Pressel
+
 app.post('/api/pressels', authenticateJwt, async (req, res) => {
-    // Adiciona utmify_integration_id à desestruturação
     const { name, bot_id, white_page_url, pixel_ids, utmify_integration_id } = req.body;
     if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
     
@@ -798,7 +793,6 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
 
         await sql`BEGIN`;
         try {
-            // Adiciona utmify_integration_id ao INSERT. Usa null se não for fornecido.
             const [newPressel] = await sql`
                 INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url, utmify_integration_id) 
                 VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${utmify_integration_id || null}) 
@@ -895,7 +889,8 @@ app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar as configurações.' });
     }
 });
-// NOVO: Endpoints para gerenciar integrações Utmify
+
+// --- ROTAS PARA GERENCIAR INTEGRAÇÕES UTMIFY ---
 app.get('/api/integrations/utmify', authenticateJwt, async (req, res) => {
     try {
         const integrations = await sql`
@@ -1573,37 +1568,48 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
-// ATUALIZADA: Função de envio de eventos para a Utmify
+// ATUALIZADA: Função de envio de eventos para a Utmify com debugging
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
+    console.log(`[Utmify] Iniciando envio de evento '${status}' para o clique ID: ${clickData.id}`);
     try {
-        // Passo 1: Descobrir qual token usar com base no clique
         let integrationId = null;
+
+        // Tenta obter o ID da integração a partir da pressel ou do checkout
         if (clickData.pressel_id) {
+            console.log(`[Utmify] Clique originado da Pressel ID: ${clickData.pressel_id}`);
             const [pressel] = await sql`SELECT utmify_integration_id FROM pressels WHERE id = ${clickData.pressel_id}`;
             if (pressel) {
                 integrationId = pressel.utmify_integration_id;
             }
-        } 
-        // Adicionar lógica para checkouts aqui se necessário no futuro
+        } else if (clickData.checkout_id) {
+            // Se você quiser que checkouts também enviem para a Utmify, precisará adicionar a coluna
+            // 'utmify_integration_id' à tabela 'checkouts' e descomentar a lógica abaixo.
+            console.log(`[Utmify] Clique originado do Checkout ID: ${clickData.checkout_id}`);
+            // const [checkout] = await sql`SELECT utmify_integration_id FROM checkouts WHERE id = ${clickData.checkout_id}`;
+            // if (checkout) {
+            //     integrationId = checkout.utmify_integration_id;
+            // }
+        }
 
         if (!integrationId) {
-            // Se não houver integração vinculada, simplesmente não faz nada.
+            console.log(`[Utmify] Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}. Abortando envio.`);
             return;
         }
 
+        console.log(`[Utmify] Integração vinculada ID: ${integrationId}. Buscando token...`);
         const [integration] = await sql`
             SELECT api_token FROM utmify_integrations 
             WHERE id = ${integrationId} AND seller_id = ${sellerData.id}
         `;
 
         if (!integration || !integration.api_token) {
-            console.error(`Token da Utmify não encontrado para a integração ID ${integrationId}.`);
+            console.error(`[Utmify] ERRO: Token não encontrado para a integração ID ${integrationId} do vendedor ${sellerData.id}.`);
             return;
         }
 
         const utmifyApiToken = integration.api_token;
-
-        // Passo 2: Montar o payload (lógica existente, sem alterações)
+        console.log(`[Utmify] Token encontrado. Montando payload...`);
+        
         const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
         const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
         const payload = {
@@ -1629,14 +1635,13 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
             isTest: false
         };
 
-        // Passo 3: Enviar o evento com o token correto
         await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
             headers: { 'x-api-token': utmifyApiToken }
         });
-        console.log(`Evento '${status}' do pedido ${payload.orderId} enviado para Utmify (Integração ID: ${integrationId}).`);
+        console.log(`[Utmify] SUCESSO: Evento '${status}' do pedido ${payload.orderId} enviado para a conta Utmify (Integração ID: ${integrationId}).`);
 
     } catch (error) {
-        console.error(`Erro ao enviar evento '${status}' para a Utmify:`, error.response?.data || error.message);
+        console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
     }
 }
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
