@@ -133,7 +133,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             qr_code_text: pixData.pix_code, 
             qr_code_base64: null, 
             transaction_id: pixData.identifier, 
-            internal_identifier: pixData.identifier,
             acquirer, 
             provider 
         };
@@ -147,10 +146,8 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
         const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
         
-        const internalIdentifier = uuidv4();
-        
         const payload = {
-            identifier: internalIdentifier,
+            identifier: uuidv4(),
             amount: value_cents / 100,
             client: clientPayload,
             callbackUrl: `https://${host}/api/webhook/${provider}`
@@ -164,15 +161,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
         pixData = response.data;
         acquirer = isCnpay ? "CNPay" : "Oasy.fy";
-        
-        return { 
-            qr_code_text: pixData.pix.code, 
-            qr_code_base64: pixData.pix.base64, 
-            transaction_id: pixData.transactionId, 
-            internal_identifier: internalIdentifier,
-            acquirer, 
-            provider 
-        };
+        return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
 
     } else { // Padrão é PushinPay
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
@@ -189,15 +178,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
         pixData = pushinpayResponse.data;
         acquirer = "Woovi";
-
-        return { 
-            qr_code_text: pixData.qr_code, 
-            qr_code_base64: pixData.qr_code_base64, 
-            transaction_id: pixData.id, 
-            internal_identifier: pixData.id,
-            acquirer, 
-            provider: 'pushinpay' 
-        };
+        return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer, provider: 'pushinpay' };
     }
 }
 
@@ -336,6 +317,7 @@ async function sendHistoricalMetaEvent(eventName, clickData, transactionData, ta
         return { success: false, error: metaError, payload: payload_sent };
     }
 }
+
 
 app.post('/api/admin/resend-events', authenticateAdmin, async (req, res) => {
     const { 
@@ -535,56 +517,6 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     } catch (error) {
         console.error("Erro na análise de uso:", error);
         res.status(500).json({ message: 'Erro ao buscar dados de uso.' });
-    }
-});
-
-// NOVO ENDPOINT: Ferramenta para reenviar eventos Utmify
-app.post('/api/admin/resend-utmify-events', authenticateAdmin, async (req, res) => {
-    const { pressel_id, utmify_integration_id } = req.body;
-
-    if (!pressel_id || !utmify_integration_id) {
-        return res.status(400).json({ message: 'pressel_id e utmify_integration_id são obrigatórios.' });
-    }
-
-    try {
-        // Passo 1: Vincular a pressel à conta Utmify permanentemente
-        await sql`UPDATE pressels SET utmify_integration_id = ${utmify_integration_id} WHERE id = ${pressel_id}`;
-        console.log(`[ADMIN-UTMIFY] Pressel ${pressel_id} agora está vinculada à integração ${utmify_integration_id}.`);
-
-        // Passo 2: Encontrar todas as transações pagas daquela pressel
-        const paidTransactions = await sql`
-            SELECT pt.*, c.*
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE c.pressel_id = ${pressel_id} AND pt.status = 'paid';
-        `;
-        
-        if (paidTransactions.length === 0) {
-            return res.status(200).json({ message: 'Associação atualizada. Nenhuma transação paga pendente encontrada para esta pressel.' });
-        }
-
-        console.log(`[ADMIN-UTMIFY] Encontradas ${paidTransactions.length} transações pagas para reenviar.`);
-
-        const [seller] = await sql`SELECT * FROM sellers s JOIN pressels p ON s.id = p.seller_id WHERE p.id = ${pressel_id}`;
-        if (!seller) {
-            throw new Error('Vendedor associado à pressel não encontrado.');
-        }
-
-        // Passo 3: Reenviar o evento para cada transação
-        let sentCount = 0;
-        for (const transaction of paidTransactions) {
-            await sendEventToUtmify('paid', transaction, transaction, seller, null, null);
-            sentCount++;
-            await new Promise(resolve => setTimeout(resolve, 200)); // Pequena pausa para evitar sobrecarga
-        }
-
-        res.status(200).json({ 
-            message: `Associação atualizada com sucesso. ${sentCount} eventos de pagamento foram reenviados para a Utmify.`
-        });
-
-    } catch (error) {
-        console.error("Erro na ferramenta de reenvio da Utmify:", error);
-        res.status(500).json({ message: 'Erro interno ao processar o reenvio.', error: error.message });
     }
 });
 
@@ -1210,11 +1142,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         for (const provider of providerOrder) {
             try {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
-                
-                const [transaction] = await sql`
-                    INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, internal_identifier, pix_id) 
-                    VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.internal_identifier}, ${pixResult.transaction_id}) 
-                    RETURNING id`;
+                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
                 if (click.pressel_id) {
                     await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
@@ -1254,7 +1182,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         
         const [transaction] = await sql`
             SELECT pt.* FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id} OR pt.internal_identifier = ${transaction_id}) AND c.seller_id = ${seller.id}`;
+            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id}) AND c.seller_id = ${seller.id}`;
 
         if (!transaction) {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
@@ -1299,6 +1227,276 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao consultar o status.' });
     }
 });
+app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    const { provider } = req.body;
+
+    if (!provider) {
+        return res.status(400).json({ message: 'O nome do provedor é obrigatório.' });
+    }
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        
+        const value_cents = 50;
+        const startTime = Date.now();
+        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+        const endTime = Date.now();
+        const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+
+        res.status(200).json({
+            provider: provider.toUpperCase(),
+            acquirer: pixResult.acquirer,
+            responseTime: responseTime,
+            qr_code_text: pixResult.qr_code_text
+        });
+
+    } catch (error) {
+        console.error(`[PIX TEST ERROR] Seller ID: ${sellerId}, Provider: ${provider} - Erro:`, error.response?.data || error.message);
+        res.status(500).json({ 
+            message: `Falha ao gerar PIX de teste com ${provider.toUpperCase()}. Verifique as credenciais.`, 
+            details: error.response?.data?.message || error.message 
+        });
+    }
+});
+app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    let testLog = [];
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        
+        const providerOrder = [
+            { name: seller.pix_provider_primary, position: 'Primário' },
+            { name: seller.pix_provider_secondary, position: 'Secundário' },
+            { name: seller.pix_provider_tertiary, position: 'Terciário' }
+        ].filter(p => p.name); 
+
+        if (providerOrder.length === 0) {
+            return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
+        }
+
+        const value_cents = 50;
+
+        for (const providerInfo of providerOrder) {
+            const provider = providerInfo.name;
+            const position = providerInfo.position;
+            
+            try {
+                const startTime = Date.now();
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                const endTime = Date.now();
+                const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+
+                testLog.push(`SUCESSO com Provedor ${position} (${provider.toUpperCase()}).`);
+                return res.status(200).json({
+                    success: true, position: position, provider: provider.toUpperCase(),
+                    acquirer: pixResult.acquirer, responseTime: responseTime,
+                    qr_code_text: pixResult.qr_code_text, log: testLog
+                });
+
+            } catch (error) {
+                const errorMessage = error.response?.data?.details || error.message;
+                console.error(`Falha no provedor ${position} (${provider}):`, errorMessage);
+                testLog.push(`FALHA com Provedor ${position} (${provider.toUpperCase()}): ${errorMessage}`);
+            }
+        }
+
+        console.error("Todos os provedores na rota de prioridade falharam.");
+        return res.status(500).json({
+            success: false, message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
+            log: testLog
+        });
+
+    } catch (error) {
+        console.error(`[PIX PRIORITY TEST ERROR] Erro geral:`, error.message);
+        res.status(500).json({ 
+            success: false, message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
+            log: testLog
+        });
+    }
+});
+app.post('/api/webhook/telegram/:botId', async (req, res) => {
+    const { botId } = req.params;
+
+    if (req.body.callback_query) {
+        const { callback_query } = req.body;
+        const chatId = callback_query.message.chat.id;
+        const [action, ...params] = callback_query.data.split('|');
+
+        try {
+            const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
+            if (!bot) { return res.status(404).send('Bot not found'); }
+            const botToken = bot.bot_token;
+            const apiUrl = `https://api.telegram.org/bot${botToken}`;
+
+            switch(action) {
+                case 'generate_pix':
+                    const [value] = params;
+                    const value_cents = parseInt(value, 10);
+                    const [click] = await sql`INSERT INTO clicks (seller_id) VALUES (${bot.seller_id}) RETURNING id`;
+                    if (!click) { throw new Error('Não foi possível criar um registro de clique.'); }
+                    const click_id_internal = click.id;
+                    const clean_click_id = `lead${click_id_internal.toString().padStart(6, '0')}`;
+                    await sql`UPDATE clicks SET click_id = ${'/start ' + clean_click_id} WHERE id = ${click_id_internal}`;
+                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${bot.seller_id}`;
+                    const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
+                    if (providerOrder.length === 0) providerOrder.push('pushinpay');
+                    let pixResult;
+                    for (const provider of providerOrder) {
+                        try {
+                            pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                            if (pixResult) break;
+                        } catch (e) { console.error(`Falha ao gerar PIX com ${provider} no fluxo do bot: ${e.message}`); }
+                    }
+                    if (!pixResult) throw new Error('Todos os provedores de PIX falharam.');
+                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click_id_internal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                    const pixMessagePayload = { chat_id: chatId, text: `<code>${pixResult.qr_code_text}</code>`, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "📋 Copiar Código PIX", callback_data: `copy_pix`}]] } };
+                    await axios.post(`${apiUrl}/sendMessage`, pixMessagePayload);
+                    const confirmationPayload = { chat_id: chatId, text: "Após efetuar o pagamento, clique no botão abaixo para verificar.", parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "Conferir Pagamento", callback_data: `check_payment|${pixResult.transaction_id}` }]] } };
+                    await axios.post(`${apiUrl}/sendMessage`, confirmationPayload);
+                    break;
+                case 'check_payment':
+                    const [txId] = params;
+                    const [transaction] = await sql`SELECT status FROM pix_transactions WHERE provider_transaction_id = ${txId} OR pix_id = ${txId}`;
+                    let feedbackMessage = "❌ Pagamento ainda não identificado. Por favor, tente novamente em alguns instantes.";
+                    if (transaction && (transaction.status === 'paid' || transaction.status === 'COMPLETED')) { feedbackMessage = "✅ Pagamento confirmado com sucesso! Obrigado."; }
+                    await axios.post(`${apiUrl}/sendMessage`, { chat_id: chatId, text: feedbackMessage });
+                    break;
+                case 'copy_pix':
+                     await axios.post(`${apiUrl}/answerCallbackQuery`, { callback_query_id: callback_query.id, text: "Copiado! Agora é só colar no app do seu banco.", show_alert: true });
+                    break;
+            }
+        } catch (error) { console.error('Erro no processamento do callback do webhook:', error.message, error.stack); }
+        return res.sendStatus(200);
+    }
+
+    const { message } = req.body;
+    
+    if (!message || !message.text || !message.chat || message.chat.id < 0) {
+        return res.sendStatus(200);
+    }
+
+    if (message.text.startsWith('/start ')) {
+        const chatId = message.chat.id;
+        const userId = message.from.id;
+        const firstName = message.from.first_name;
+        const lastName = message.from.last_name || null;
+        const username = message.from.username || null;
+        const clickId = message.text.split(' ')[1] || null;
+
+        try {
+            const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
+            if (!bot) { 
+                console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
+                return res.status(404).send('Bot not found'); 
+            }
+            await sql`
+                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
+                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
+                ON CONFLICT (chat_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+                    username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+            `;
+        } catch (error) {
+            console.error('Erro ao processar comando /start do Telegram:', error);
+            return res.sendStatus(500);
+        }
+    }
+    
+    res.sendStatus(200);
+});
+app.get('/api/dispatches', authenticateJwt, async (req, res) => {
+    try {
+        const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
+        res.status(200).json(dispatches);
+    } catch (error) {
+        console.error("Erro ao buscar histórico de disparos:", error);
+        res.status(500).json({ message: 'Erro ao buscar histórico.' });
+    }
+});
+app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const details = await sql`
+            SELECT d.*, u.first_name, u.username
+            FROM mass_send_details d
+            LEFT JOIN telegram_chats u ON d.chat_id = u.chat_id
+            WHERE d.mass_send_id = ${id}
+            ORDER BY d.sent_at;
+        `;
+        res.status(200).json(details);
+    } catch (error) {
+        console.error("Erro ao buscar detalhes do disparo:", error);
+        res.status(500).json({ message: 'Erro ao buscar detalhes.' });
+    }
+});
+app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    const { botIds, flowType, initialText, ctaButtonText, pixValue, externalLink, imageUrl } = req.body;
+
+    if (!botIds || botIds.length === 0 || !initialText || !ctaButtonText) {
+        return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+    }
+
+    try {
+        const bots = await sql`SELECT id, bot_token FROM telegram_bots WHERE id = ANY(${botIds}) AND seller_id = ${sellerId}`;
+        if (bots.length === 0) return res.status(404).json({ message: 'Nenhum bot válido selecionado.' });
+        
+        const users = await sql`SELECT DISTINCT ON (chat_id) chat_id, bot_id FROM telegram_chats WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
+        if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para os bots selecionados.' });
+
+        const [log] = await sql`INSERT INTO mass_sends (seller_id, message_content, button_text, button_url, image_url) VALUES (${sellerId}, ${initialText}, ${ctaButtonText}, ${externalLink || null}, ${imageUrl || null}) RETURNING id;`;
+        const logId = log.id;
+        
+        res.status(202).json({ message: `Disparo agendado para ${users.length} usuários.`, logId });
+        
+        (async () => {
+            let successCount = 0, failureCount = 0;
+            const botTokenMap = new Map(bots.map(b => [b.id, b.bot_token]));
+
+            for (const user of users) {
+                const botToken = botTokenMap.get(user.bot_id);
+                if (!botToken) continue;
+
+                const endpoint = imageUrl ? 'sendPhoto' : 'sendMessage';
+                const apiUrl = `https://api.telegram.org/bot${botToken}/${endpoint}`;
+                let payload;
+
+                if (flowType === 'pix_flow') {
+                    const valueInCents = Math.round(parseFloat(pixValue) * 100);
+                    const callback_data = `generate_pix|${valueInCents}`;
+                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, callback_data }]] } };
+                } else {
+                    payload = { chat_id: user.chat_id, caption: initialText, text: initialText, photo: imageUrl, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: ctaButtonText, url: externalLink }]] } };
+                }
+                
+                if (!imageUrl) { delete payload.photo; delete payload.caption; } else { delete payload.text; }
+
+                try {
+                    await axios.post(apiUrl, payload, { timeout: 10000 });
+                    successCount++;
+                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status) VALUES (${logId}, ${user.chat_id}, 'success')`;
+                } catch (error) {
+                    failureCount++;
+                    const errorMessage = error.response?.data?.description || error.message;
+                    console.error(`Falha ao enviar para ${user.chat_id}: ${errorMessage}`);
+                    await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status, details) VALUES (${logId}, ${user.chat_id}, 'failure', ${errorMessage})`;
+                }
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+
+            await sql`UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount} WHERE id = ${logId};`;
+            console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
+        })();
+
+    } catch (error) {
+        console.error("Erro no disparo em massa:", error);
+        if (!res.headersSent) res.status(500).json({ message: 'Erro ao iniciar o disparo.' });
+    }
+});
 app.post('/api/webhook/pushinpay', async (req, res) => {
     const { id, status, payer_name, payer_document } = req.body;
     if (status === 'paid') {
@@ -1312,32 +1510,28 @@ app.post('/api/webhook/pushinpay', async (req, res) => {
     res.sendStatus(200);
 });
 app.post('/api/webhook/cnpay', async (req, res) => {
-    const { identifier, status, customer } = req.body;
+    const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
-            console.log(`[Webhook CNPay] Recebido pagamento para identifier: ${identifier}`);
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE internal_identifier = ${identifier} AND provider = 'cnpay'`;
-            
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'cnpay'`;
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
-            } else {
-                console.log(`[Webhook CNPay] Transação com identifier ${identifier} ignorada (já paga ou não encontrada).`);
             }
-        } catch (error) { console.error("[Webhook CNPay] ERRO:", error); }
+        } catch (error) { console.error("Erro no webhook da CNPay:", error); }
     }
     res.sendStatus(200);
 });
 app.post('/api/webhook/oasyfy', async (req, res) => {
-    const { identifier, status, customer } = req.body;
+    const { transactionId, status, customer } = req.body;
     if (status === 'COMPLETED') {
         try {
-            console.log(`[Webhook Oasy.fy] Recebido pagamento para identifier: ${identifier}`);
-            const [tx] = await sql`SELECT * FROM pix_transactions WHERE internal_identifier = ${identifier} AND provider = 'oasyfy'`;
+            console.log(`[Webhook Oasy.fy] Recebido pagamento para transação: ${transactionId}`);
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             
             if (tx && tx.status !== 'paid') {
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
             } else {
-                console.log(`[Webhook Oasy.fy] Transação com identifier ${identifier} ignorada (já paga ou não encontrada).`);
+                console.log(`[Webhook Oasy.fy] Transação ${transactionId} ignorada (já paga ou não encontrada).`);
             }
         } catch (error) { 
             console.error("[Webhook Oasy.fy] ERRO:", error); 
