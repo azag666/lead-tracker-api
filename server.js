@@ -1522,28 +1522,33 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     res.sendStatus(200);
 });
 
-// ATUALIZADO: Webhook da Oasy.fy com logs de depuração detalhados
+// **CORRIGIDO**: Webhook da Oasy.fy agora lê a estrutura de dados correta
 app.post('/api/webhook/oasyfy', async (req, res) => {
-    // Log 1: Captura o corpo inteiro do webhook para análise
     console.log('[Webhook Oasy.fy] Corpo completo do webhook recebido:', JSON.stringify(req.body, null, 2));
 
-    const { transactionId, status, customer } = req.body;
+    // Acessa os dados aninhados dentro do objeto 'transaction'
+    const transactionData = req.body.transaction;
+    const customer = req.body.client;
+
+    // Verifica se os dados necessários existem antes de prosseguir
+    if (!transactionData || !transactionData.status) {
+        console.log("[Webhook Oasy.fy] Webhook ignorado: objeto 'transaction' ou 'status' ausente.");
+        return res.sendStatus(200);
+    }
+    
+    const { id: transactionId, status } = transactionData;
 
     if (status === 'COMPLETED') {
         try {
             console.log(`[Webhook Oasy.fy] Processando pagamento para transactionId: ${transactionId}`);
             
-            // Log 2: Mostra exatamente o que estamos procurando no banco
-            console.log(`[Webhook Oasy.fy] Buscando no banco por provider_transaction_id = '${transactionId}'`);
-
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
             
-            // Log 3: Informa se a transação foi encontrada ou não
             if (tx) {
                 console.log(`[Webhook Oasy.fy] Transação encontrada no banco. ID interno: ${tx.id}, Status atual: ${tx.status}`);
                 if (tx.status !== 'paid') {
                     console.log(`[Webhook Oasy.fy] Status não é 'paid'. Chamando handleSuccessfulPayment...`);
-                    await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.taxID?.taxID });
+                    await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.cpf });
                     console.log(`[Webhook Oasy.fy] handleSuccessfulPayment concluído para transação ID ${tx.id}.`);
                 } else {
                     console.log(`[Webhook Oasy.fy] Transação ${transactionId} já está marcada como 'paid'. Nenhuma ação necessária.`);
