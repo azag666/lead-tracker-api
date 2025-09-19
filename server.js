@@ -1619,6 +1619,7 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
     }
 }
+// **CORRIGIDO**: Função de envio para a Meta agora é mais robusta e remove o campo 'cpf'
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     try {
         let presselPixels = [];
@@ -1634,12 +1635,18 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         }
 
         const userData = {
-            client_ip_address: clickData.ip_address,
-            client_user_agent: clickData.user_agent,
             fbp: clickData.fbp || undefined,
             fbc: clickData.fbc || undefined,
             external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
         };
+
+        // Validação e limpeza dos dados do usuário para evitar "Invalid parameter"
+        if (clickData.ip_address && clickData.ip_address !== '::1' && !clickData.ip_address.startsWith('127.0.0.1')) {
+            userData.client_ip_address = clickData.ip_address;
+        }
+        if (clickData.user_agent && clickData.user_agent.length > 10) { // Checagem simples de validade
+            userData.client_user_agent = clickData.user_agent;
+        }
 
         if (customerData?.name) {
             const nameParts = customerData.name.trim().split(' ');
@@ -1650,10 +1657,8 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                 userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
             }
         }
-        if (customerData?.document) {
-            const cleanedDocument = customerData.document.replace(/\D/g, '');
-             userData.cpf = [crypto.createHash('sha256').update(cleanedDocument).digest('hex')];
-        }
+        // REMOVIDO: O campo 'cpf' não é suportado e estava causando o erro.
+        // if (customerData?.document) { ... }
 
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
@@ -1685,6 +1690,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     delete payload.data[0].custom_data.value;
                 }
 
+                console.log(`[Meta Pixel] Enviando payload para o pixel ${pixel_id}:`, JSON.stringify(payload, null, 2));
                 await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
                 console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
 
@@ -1694,7 +1700,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             }
         }
     } catch (error) {
-        console.error(`Erro ao enviar evento '${eventName}' para a Meta:`, error.response?.data?.error?.message || error.message);
+        console.error(`Erro ao enviar evento '${eventName}' para a Meta. Detalhes:`, error.response?.data || error.message);
     }
 }
 async function checkPendingTransactions() {
