@@ -686,22 +686,14 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
     }
 });
 app.post('/api/bots', authenticateJwt, async (req, res) => {
-    const { bot_name, bot_token } = req.body;
-    if (!bot_name || !bot_token) return res.status(400).json({ message: 'Nome e token são obrigatórios.' });
+    const { bot_name } = req.body;
+    if (!bot_name) return res.status(400).json({ message: 'O nome do bot é obrigatório.' });
     try {
-        const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${bot_token}) RETURNING *;`;
-
-        const webhookUrl = `https://${req.headers.host}/api/webhook/telegram/${newBot[0].id}`;
-        await axios.post(`https://api.telegram.org/bot${bot_token}/setWebhook`, { url: webhookUrl });
-        console.log(`Webhook registrado com sucesso para o bot ${bot_name} em: ${webhookUrl}`);
-
+        const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${null}) RETURNING *;`;
         res.status(201).json(newBot[0]);
     } catch (error) {
         if (error.code === '23505') { 
-            if (error.constraint_name === 'telegram_bots_bot_token_key') {
-                return res.status(409).json({ message: 'Este token de bot já está em uso.' });
-            }
-             if (error.constraint_name === 'telegram_bots_bot_name_key') {
+            if (error.constraint_name === 'telegram_bots_bot_name_key') {
                 return res.status(409).json({ message: 'Um bot com este nome de usuário já existe.' });
             }
         }
@@ -726,6 +718,9 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         const [bot] = await sql`SELECT bot_token, bot_name FROM telegram_bots WHERE id = ${bot_id} AND seller_id = ${req.user.id}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não pertence a este usuário.' });
+        }
+        if (!bot.bot_token) {
+            return res.status(400).json({ message: 'Token do bot não configurado. Impossível testar.'})
         }
 
         const response = await axios.get(`https://api.telegram.org/bot${bot.bot_token}/getMe`);
