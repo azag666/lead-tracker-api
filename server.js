@@ -1048,9 +1048,10 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
              ? sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
              : sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
 
+        const userTimezone = 'America/Sao_Paulo'; // Fuso horário de referência para o dashboard
         const dailyRevenueQuery = hasDateFilter
-            ? sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`
-            : sql`SELECT DATE(pt.paid_at AT TIME ZONE 'UTC') as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE 'UTC') ORDER BY date ASC`;
+            ? sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY DATE(pt.paid_at AT TIME ZONE ${userTimezone}) ORDER BY date ASC`
+            : sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY DATE(pt.paid_at AT TIME ZONE ${userTimezone}) ORDER BY date ASC`;
         
         const trafficSourceQuery = hasDateFilter
             ? sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY source ORDER BY clicks DESC`
