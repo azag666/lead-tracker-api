@@ -687,15 +687,19 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
 });
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const { bot_name } = req.body;
-    if (!bot_name) return res.status(400).json({ message: 'O nome do bot é obrigatório.' });
+    if (!bot_name) {
+        return res.status(400).json({ message: 'O nome do bot é obrigatório.' });
+    }
     try {
-        const newBot = await sql`INSERT INTO telegram_bots (seller_id, bot_name, bot_token) VALUES (${req.user.id}, ${bot_name}, ${null}) RETURNING *;`;
-        res.status(201).json(newBot[0]);
+        const [newBot] = await sql`
+            INSERT INTO telegram_bots (seller_id, bot_name, bot_token) 
+            VALUES (${req.user.id}, ${bot_name}, '') 
+            RETURNING *;
+        `;
+        res.status(201).json(newBot);
     } catch (error) {
-        if (error.code === '23505') { 
-            if (error.constraint_name === 'telegram_bots_bot_name_key') {
-                return res.status(409).json({ message: 'Um bot com este nome de usuário já existe.' });
-            }
+        if (error.code === '23505' && error.constraint_name === 'telegram_bots_bot_name_key') {
+            return res.status(409).json({ message: 'Um bot com este nome de usuário já existe.' });
         }
         console.error("Erro ao salvar bot:", error);
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
