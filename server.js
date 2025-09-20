@@ -1025,7 +1025,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
         if (hasDateFilter) {
-            endDate = `${endDate} 23:59:59`;
         }
 
         const totalClicksQuery = hasDateFilter
