@@ -75,7 +75,6 @@ async function logApiRequest(req, res, next) {
 
 // --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
 
-// Função para obter e gerenciar o token da SyncPay
 async function getSyncPayAuthToken(seller) {
     const cachedToken = syncPayTokenCache.get(seller.id);
     if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
@@ -99,7 +98,6 @@ async function getSyncPayAuthToken(seller) {
     return access_token;
 }
 
-// Função para gerar PIX nos diferentes provedores
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
@@ -182,37 +180,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     }
 }
 
-// Função para verificar e conceder conquistas
-async function checkAndAwardAchievements(seller_id) {
-    try {
-        const [totalRevenueResult] = await sql`
-            SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
-            WHERE c.seller_id = ${seller_id} AND pt.status = 'paid';
-        `;
-        const totalRevenueCents = Math.round(totalRevenueResult.total_revenue * 100);
-
-        const achievements = await sql`
-            SELECT a.id, a.sales_goal
-            FROM achievements a
-            LEFT JOIN user_achievements ua ON a.id = ua.achievement_id AND ua.seller_id = ${seller_id}
-            WHERE ua.id IS NULL OR ua.is_completed = FALSE;
-        `;
-        
-        for (const achievement of achievements) {
-            if (totalRevenueCents >= achievement.sales_goal) {
-                await sql`INSERT INTO user_achievements (seller_id, achievement_id, is_completed, completion_date) VALUES (${seller_id}, ${achievement.id}, TRUE, NOW());`;
-                console.log(`Conquista concedida ao vendedor ${seller_id}.`);
-            }
-        }
-    } catch (error) {
-        console.error("Erro ao verificar e conceder conquistas:", error);
-    }
-}
-
-
-// Função central para processar pagamentos bem-sucedidos
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
@@ -1752,3 +1719,4 @@ async function checkPendingTransactions() {
 // setInterval(checkPendingTransactions, 180000); 
 
 module.exports = app;
+
