@@ -1718,5 +1718,104 @@ async function checkPendingTransactions() {
 
 // setInterval(checkPendingTransactions, 180000); 
 
-module.exports = app;
+// ==========================================================
+//          NOVAS ROTAS PARA O CRIADOR DE FLUXOS
+//        *** TOTALMENTE SEPARADO DAS PRESSELS ***
+// ==========================================================
 
+// Função auxiliar para o fluxo inicial
+const createInitialFlowNodes = () => ({
+    nodes: [{ id: 1, type: 'start', content: 'Início do Fluxo', position: { x: 50, y: 150 }, outputs: [{ id: 'out', nextStepId: null }] }]
+});
+
+// GET: Buscar todos os fluxos de um usuário
+app.get('/api/flows', authenticateJwt, async (req, res) => {
+    try {
+        const flows = await sql`
+            SELECT f.* FROM flows f
+            JOIN telegram_bots b ON f.bot_id = b.id
+            WHERE b.seller_id = ${req.user.id} 
+            ORDER BY f.created_at DESC`;
+        
+        const safeFlows = flows.map(flow => ({
+            ...flow,
+            nodes: flow.nodes || createInitialFlowNodes().nodes
+        }));
+
+        res.status(200).json(safeFlows);
+    } catch (error) {
+        console.error("Erro ao buscar fluxos:", error);
+        res.status(500).json({ message: 'Erro ao buscar os fluxos.' });
+    }
+});
+
+// POST: Criar um novo fluxo
+app.post('/api/flows', authenticateJwt, async (req, res) => {
+    const { name, botId } = req.body;
+    if (!name || !botId) {
+        return res.status(400).json({ message: 'Nome do fluxo e ID do bot são obrigatórios.' });
+    }
+    
+    try {
+        const initialNodes = createInitialFlowNodes();
+        const [newFlow] = await sql`
+            INSERT INTO flows (bot_id, name, nodes) 
+            VALUES (${botId}, ${name}, ${JSON.stringify(initialNodes.nodes)}) 
+            RETURNING *;`;
+        res.status(201).json(newFlow);
+    } catch (error) {
+        console.error("Erro ao criar fluxo:", error);
+        res.status(500).json({ message: 'Erro ao criar o fluxo.' });
+    }
+});
+
+// PUT: Atualizar um fluxo existente
+app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    const { name, nodes } = req.body;
+    if (!name || !nodes) {
+        return res.status(400).json({ message: 'Nome e estrutura de nós são obrigatórios.' });
+    }
+
+    try {
+        // Validação de segurança: garante que o fluxo pertence ao usuário logado
+        const [updatedFlow] = await sql`
+            UPDATE flows f
+            SET name = ${name}, nodes = ${JSON.stringify(nodes)}, updated_at = CURRENT_TIMESTAMP
+            FROM telegram_bots b
+            WHERE f.id = ${id} AND f.bot_id = b.id AND b.seller_id = ${req.user.id}
+            RETURNING f.*;`;
+            
+        if (updatedFlow) {
+            res.status(200).json(updatedFlow);
+        } else {
+            res.status(404).json({ message: 'Fluxo não encontrado ou não autorizado.' });
+        }
+    } catch (error) {
+        console.error("Erro ao atualizar fluxo:", error);
+        res.status(500).json({ message: 'Erro ao salvar o fluxo.' });
+    }
+});
+
+// DELETE: Deletar um fluxo
+app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    try {
+        const result = await sql`
+            DELETE FROM flows f
+            USING telegram_bots b
+            WHERE f.id = ${id} AND f.bot_id = b.id AND b.seller_id = ${req.user.id}`;
+        
+        if (result.count > 0) {
+            res.status(204).send(); // Sucesso
+        } else {
+            res.status(404).json({ message: 'Fluxo não encontrado ou não autorizado.' });
+        }
+    } catch (error) {
+        console.error("Erro ao deletar fluxo:", error);
+        res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
+    }
+});
+
+
+module.exports = app;
