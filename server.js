@@ -1488,11 +1488,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         
         const text = message.text;
         let clickId = null;
-        if (text.startsWith('/start ')) { // Alterado para aceitar qualquer coisa depois de /start
-            clickId = text; // Salva o comando /start completo
+        if (text.startsWith('/start ')) {
+            clickId = text;
         }
 
-        const [existingUser] = await sql`SELECT chat_id FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+        const [existingUser] = await sql`SELECT chat_id FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId} LIMIT 1`;
         
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
@@ -1500,13 +1500,11 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
         
-        // **LÓGICA CORRIGIDA**: Só inicia um novo fluxo se o usuário for novo E a msg for /start
         if (!existingUser && clickId) {
-             // Deleta qualquer estado antigo para garantir um começo limpo
             await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
             await processFlow(chatId, botId, botToken, sellerId, text, clickId);
         } else {
-             await processFlow(chatId, botId, botToken, sellerId, text, null); // Continua fluxo existente
+             await processFlow(chatId, botId, botToken, sellerId, text, null);
         }
 
     } catch (error) {
@@ -1844,6 +1842,7 @@ async function checkPendingTransactions() {
 // ==========================================================
 //          ROTAS PARA O CRIADOR DE FLUXOS E CHAT
 // ==========================================================
+
 const createInitialFlowStructure = () => ({
     nodes: [{ id: 'start', type: 'trigger', position: { x: 250, y: 50 }, data: {} }],
     edges: []
@@ -1931,6 +1930,8 @@ app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
     }
 });
+
+// ========= ROTA DO CHAT CORRIGIDA =========
 app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const sellerId = req.user.id;
@@ -1941,6 +1942,8 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
 
+        // CORREÇÃO: A query agora busca o último registro de cada chat_id sem filtrar pelo sender_type
+        // e ordena pela data da última mensagem para exibir os mais recentes primeiro.
         const users = await sql`
             SELECT DISTINCT ON (chat_id) 
                    chat_id, first_name, last_name, username, click_id,
@@ -1955,6 +1958,7 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar usuários do chat.' });
     }
 });
+
 app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const chatId = parseInt(req.params.chatId, 10);
@@ -2020,8 +2024,6 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
         res.status(500).json({ message: 'Não foi possível enviar a mensagem.' });
     }
 });
-
-// ========= ROTA CORRIGIDA =========
 app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId, chatId } = req.params;
     const sellerId = req.user.id;
@@ -2032,25 +2034,20 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
         
-        // Inicia uma transação para garantir que ambas as exclusões ocorram com sucesso
         await sql`BEGIN`;
         
-        // 1. Deleta o estado do fluxo do usuário
         await sql`
             DELETE FROM user_flow_states 
             WHERE bot_id = ${botId} AND chat_id = ${chatId}`;
             
-        // 2. Deleta o histórico de mensagens do usuário
         await sql`
             DELETE FROM telegram_chats 
             WHERE bot_id = ${botId} AND chat_id = ${chatId} AND seller_id = ${sellerId}`;
             
-        // Confirma a transação
         await sql`COMMIT`;
         
         res.status(204).send();
     } catch (error) {
-        // Se algo der errado, desfaz a transação
         await sql`ROLLBACK`;
         console.error("Erro ao deletar conversa e estado do usuário:", error);
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
