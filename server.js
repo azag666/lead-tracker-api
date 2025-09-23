@@ -1348,7 +1348,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 // ==========================================================
-//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (CORRIGIDO)
 // ==========================================================
 async function findNextNode(currentNodeId, edges) {
     const edge = edges.find(e => e.source === currentNodeId);
@@ -1365,13 +1365,11 @@ async function sendMessage(chatId, text, botToken) {
     }
 }
 
-async function processFlow(chatId, botId, botToken, sellerId, messageText = null) {
+async function processFlow(chatId, botId, botToken, sellerId, messageText = null, initialClickId = null) {
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
     if (!flow || !flow.nodes) return;
 
-    // AQUI ESTÁ A CORREÇÃO: Verifica se flow.nodes é um texto antes de usar JSON.parse
     const flowData = typeof flow.nodes === 'string' ? JSON.parse(flow.nodes) : flow.nodes;
-    
     const nodes = flowData.nodes || [];
     const edges = flowData.edges || [];
 
@@ -1379,12 +1377,17 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     let currentNodeId = userState ? userState.current_node_id : null;
     let variables = userState ? userState.variables : {};
 
+    // NOVO: Se for o início e tiver um click_id, salva-o.
+    if (!userState && initialClickId) {
+        variables.click_id = initialClickId;
+    }
+
     if (userState && userState.waiting_for_input) {
         variables[userState.waiting_for_input] = messageText;
         await sql`UPDATE user_flow_states SET waiting_for_input = NULL, variables = ${JSON.stringify(variables)} WHERE id = ${userState.id}`;
         currentNodeId = await findNextNode(currentNodeId, edges);
     } else if (!userState) {
-        const startNode = nodes.find(n => n.data.label === 'Início');
+        const startNode = nodes.find(n => n.id === 'start');
         currentNodeId = startNode ? await findNextNode(startNode.id, edges) : null;
     }
 
@@ -1400,17 +1403,12 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                 await sendMessage(chatId, currentNode.data.text, botToken);
                 currentNodeId = await findNextNode(currentNodeId, edges);
                 break;
-            
-            case 'collect_input':
-                await sql`UPDATE user_flow_states SET waiting_for_input = 'last_input' WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                currentNodeId = null; // Pausa o fluxo
-                break;
 
             case 'action_pix':
-                const clickIdForPix = variables.last_input;
+                const clickIdForPix = variables.click_id; // Usa o click_id salvo
                 const valueInCents = currentNode.data.valueInCents || 1000;
                 if (!clickIdForPix) {
-                    await sendMessage(chatId, "⚠️ Erro: Não foi possível encontrar o Click ID para gerar o PIX.", botToken);
+                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para gerar o PIX.", botToken);
                 } else {
                     try {
                         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
@@ -1423,13 +1421,9 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                                 await sendMessage(chatId, pixMessage, botToken);
                                 pixGenerated = true;
                                 break;
-                            } catch (e) {
-                                console.error(`[Flow Engine] Falha ao gerar PIX com ${provider} para ${clickIdForPix}:`, e.message);
-                            }
+                            } catch (e) { console.error(`[Flow Engine] Falha ao gerar PIX com ${provider} para ${clickIdForPix}:`, e.message); }
                         }
-                        if (!pixGenerated) {
-                            await sendMessage(chatId, "❌ Desculpe, não foi possível gerar seu PIX no momento. Tente novamente mais tarde.", botToken);
-                        }
+                        if (!pixGenerated) await sendMessage(chatId, "❌ Desculpe, não foi possível gerar seu PIX no momento.", botToken);
                     } catch (error) {
                         console.error("[Flow Engine] Erro crítico na ação de gerar PIX:", error);
                         await sendMessage(chatId, "❌ Ocorreu um erro interno ao gerar o PIX.", botToken);
@@ -1439,18 +1433,15 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                 break;
 
             case 'action_city':
-                const clickIdForCity = variables.last_input;
+                const clickIdForCity = variables.click_id; // Usa o click_id salvo
                  if (!clickIdForCity) {
-                    await sendMessage(chatId, "⚠️ Erro: Não foi possível encontrar o Click ID para consultar a cidade.", botToken);
+                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para consultar a cidade.", botToken);
                 } else {
                     try {
                          const db_click_id = clickIdForCity.startsWith('/start ') ? clickIdForCity : `/start ${clickIdForCity}`;
                          const [clickInfo] = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${sellerId}`;
-                         if (clickInfo) {
-                            await sendMessage(chatId, `📍 Cidade encontrada: ${clickInfo.city} - ${clickInfo.state}`, botToken);
-                         } else {
-                            await sendMessage(chatId, `⚠️ Não encontrei informações de cidade para o ID informado.`, botToken);
-                         }
+                         if (clickInfo) await sendMessage(chatId, `📍 Cidade encontrada: ${clickInfo.city} - ${clickInfo.state}`, botToken);
+                         else await sendMessage(chatId, `⚠️ Não encontrei informações de cidade para o ID informado.`, botToken);
                     } catch (error) {
                         console.error("[Flow Engine] Erro na ação de consultar cidade:", error);
                         await sendMessage(chatId, "❌ Ocorreu um erro interno ao consultar a cidade.", botToken);
@@ -1460,7 +1451,7 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                 break;
 
             default:
-                currentNodeId = null; // Tipo de nó desconhecido, para o fluxo
+                currentNodeId = null;
                 break;
         }
         safetyLock++;
@@ -1470,7 +1461,7 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
     const body = req.body;
-    res.sendStatus(200); // Responde imediatamente ao Telegram
+    res.sendStatus(200);
 
     try {
         const message = body.message;
@@ -1478,21 +1469,23 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         if (!chatId || !message.text) return;
 
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) {
-            console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`);
-            return;
-        }
+        if (!bot) { console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`); return; }
+        
         const { seller_id: sellerId, bot_token: botToken } = bot;
         
-        // Salva a mensagem recebida no histórico
+        const text = message.text;
+        let clickId = null;
+        if (text.startsWith('/start lead')) {
+            clickId = text.split(' ')[1]; // Extrai "lead..."
+        }
+
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
-            VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${message.text.startsWith('/start ') ? message.text.split(' ')[1] : null}, ${message.text}, 'user')
+            VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${clickId}, ${text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
 
-        // Inicia o processamento do fluxo
-        await processFlow(chatId, botId, botToken, sellerId, message.text);
+        await processFlow(chatId, botId, botToken, sellerId, text, clickId);
 
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
@@ -1850,7 +1843,7 @@ async function checkPendingTransactions() {
 
 // Função auxiliar para criar a estrutura completa do fluxo
 const createInitialFlowStructure = () => ({
-    nodes: [{ id: '1', type: 'message', position: { x: 100, y: 100 }, data: { label: 'Início', text: 'Bem-vindo ao fluxo!' } }],
+    nodes: [{ id: 'start', type: 'message', position: { x: 100, y: 100 }, data: { label: 'Início', text: 'Gatilho: Novo Contato' } }],
     edges: []
 });
 
