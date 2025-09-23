@@ -1488,17 +1488,26 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         
         const text = message.text;
         let clickId = null;
-        if (text.startsWith('/start lead')) {
-            clickId = text.split(' ')[1]; // Extrai "lead..."
+        if (text.startsWith('/start ')) { // Alterado para aceitar qualquer coisa depois de /start
+            clickId = text; // Salva o comando /start completo
         }
 
+        const [existingUser] = await sql`SELECT chat_id FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+        
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
             VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${clickId}, ${text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
-
-        await processFlow(chatId, botId, botToken, sellerId, text, clickId);
+        
+        // **LÓGICA CORRIGIDA**: Só inicia um novo fluxo se o usuário for novo E a msg for /start
+        if (!existingUser && clickId) {
+             // Deleta qualquer estado antigo para garantir um começo limpo
+            await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            await processFlow(chatId, botId, botToken, sellerId, text, clickId);
+        } else {
+             await processFlow(chatId, botId, botToken, sellerId, text, null); // Continua fluxo existente
+        }
 
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
@@ -1619,29 +1628,19 @@ app.post('/api/webhook/cnpay', async (req, res) => {
     }
     res.sendStatus(200);
 });
-
-// **CORRIGIDO**: Webhook da Oasy.fy agora lê a estrutura de dados correta
 app.post('/api/webhook/oasyfy', async (req, res) => {
     console.log('[Webhook Oasy.fy] Corpo completo do webhook recebido:', JSON.stringify(req.body, null, 2));
-
-    // Acessa os dados aninhados dentro do objeto 'transaction'
     const transactionData = req.body.transaction;
     const customer = req.body.client;
-
-    // Verifica se os dados necessários existem antes de prosseguir
     if (!transactionData || !transactionData.status) {
         console.log("[Webhook Oasy.fy] Webhook ignorado: objeto 'transaction' ou 'status' ausente.");
         return res.sendStatus(200);
     }
-    
     const { id: transactionId, status } = transactionData;
-
     if (status === 'COMPLETED') {
         try {
             console.log(`[Webhook Oasy.fy] Processando pagamento para transactionId: ${transactionId}`);
-            
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'oasyfy'`;
-            
             if (tx) {
                 console.log(`[Webhook Oasy.fy] Transação encontrada no banco. ID interno: ${tx.id}, Status atual: ${tx.status}`);
                 if (tx.status !== 'paid') {
@@ -1660,7 +1659,6 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     } else {
         console.log(`[Webhook Oasy.fy] Recebido webhook com status '${status}', que não é 'COMPLETED'. Ignorando.`);
     }
-
     res.sendStatus(200);
 });
 
@@ -1717,7 +1715,6 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
     }
 }
-// **CORRIGIDO**: Função de envio para a Meta agora é mais robusta e remove o campo 'cpf'
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     try {
         let presselPixels = [];
@@ -1738,11 +1735,10 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
         };
 
-        // Validação e limpeza dos dados do usuário para evitar "Invalid parameter"
         if (clickData.ip_address && clickData.ip_address !== '::1' && !clickData.ip_address.startsWith('127.0.0.1')) {
             userData.client_ip_address = clickData.ip_address;
         }
-        if (clickData.user_agent && clickData.user_agent.length > 10) { // Checagem simples de validade
+        if (clickData.user_agent && clickData.user_agent.length > 10) { 
             userData.client_user_agent = clickData.user_agent;
         }
 
@@ -1755,8 +1751,6 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                 userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
             }
         }
-        // REMOVIDO: O campo 'cpf' não é suportado e estava causando o erro.
-        // if (customerData?.document) { ... }
 
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
@@ -1847,20 +1841,13 @@ async function checkPendingTransactions() {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
-
-// setInterval(checkPendingTransactions, 180000); 
-
 // ==========================================================
 //          ROTAS PARA O CRIADOR DE FLUXOS E CHAT
 // ==========================================================
-
-// Função auxiliar para criar a estrutura completa do fluxo
 const createInitialFlowStructure = () => ({
     nodes: [{ id: 'start', type: 'trigger', position: { x: 250, y: 50 }, data: {} }],
     edges: []
 });
-
-// GET: Buscar todos os fluxos de um usuário
 app.get('/api/flows', authenticateJwt, async (req, res) => {
     try {
         const flows = await sql`
@@ -1879,8 +1866,6 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar os fluxos.' });
     }
 });
-
-// POST: Criar um novo fluxo
 app.post('/api/flows', authenticateJwt, async (req, res) => {
     const { name, botId } = req.body;
     const sellerId = req.user.id; 
@@ -1903,8 +1888,6 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao criar o fluxo.' });
     }
 });
-
-// PUT: Atualizar um fluxo existente
 app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const { name, nodes } = req.body; 
@@ -1929,8 +1912,6 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o fluxo.' });
     }
 });
-
-// DELETE: Deletar um fluxo
 app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const sellerId = req.user.id;
@@ -1950,9 +1931,6 @@ app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
     }
 });
-
-
-// ROTAS PARA CHAT AO VIVO
 app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const sellerId = req.user.id;
@@ -1968,8 +1946,8 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
                    chat_id, first_name, last_name, username, click_id,
                    (SELECT MAX(created_at) FROM telegram_chats tc2 WHERE tc2.chat_id = tc1.chat_id) as last_message_at
             FROM telegram_chats tc1
-            WHERE bot_id = ${botId} AND sender_type = 'user'
-            ORDER BY chat_id, last_message_at DESC;
+            WHERE bot_id = ${botId} AND seller_id = ${sellerId}
+            ORDER BY last_message_at DESC;
         `;
         res.status(200).json(users);
     } catch (error) {
@@ -1977,7 +1955,6 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar usuários do chat.' });
     }
 });
-
 app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const chatId = parseInt(req.params.chatId, 10);
@@ -2000,7 +1977,6 @@ app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar mensagens do chat.' });
     }
 });
-
 app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const { chatId, text } = req.body;
@@ -2045,7 +2021,7 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
     }
 });
 
-// DELETE: Deletar uma conversa inteira
+// ========= ROTA CORRIGIDA =========
 app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId, chatId } = req.params;
     const sellerId = req.user.id;
@@ -2055,14 +2031,28 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
-
+        
+        // Inicia uma transação para garantir que ambas as exclusões ocorram com sucesso
+        await sql`BEGIN`;
+        
+        // 1. Deleta o estado do fluxo do usuário
+        await sql`
+            DELETE FROM user_flow_states 
+            WHERE bot_id = ${botId} AND chat_id = ${chatId}`;
+            
+        // 2. Deleta o histórico de mensagens do usuário
         await sql`
             DELETE FROM telegram_chats 
             WHERE bot_id = ${botId} AND chat_id = ${chatId} AND seller_id = ${sellerId}`;
+            
+        // Confirma a transação
+        await sql`COMMIT`;
         
         res.status(204).send();
     } catch (error) {
-        console.error("Erro ao deletar conversa:", error);
+        // Se algo der errado, desfaz a transação
+        await sql`ROLLBACK`;
+        console.error("Erro ao deletar conversa e estado do usuário:", error);
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
