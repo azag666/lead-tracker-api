@@ -1347,63 +1347,156 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     }
 });
 
+// ==========================================================
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM
+// ==========================================================
+async function findNextNode(currentNodeId, edges) {
+    const edge = edges.find(e => e.source === currentNodeId);
+    return edge ? edge.target : null;
+}
+
+async function sendMessage(chatId, text, botToken) {
+    if (!text || text.trim() === '') return;
+    const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
+    try {
+        await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
+    } catch (error) {
+        console.error(`[Flow Engine] Erro ao enviar mensagem para ${chatId}:`, error.response?.data || error.message);
+    }
+}
+
+async function processFlow(chatId, botId, botToken, sellerId, messageText = null) {
+    const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
+    if (!flow || !flow.nodes) return;
+
+    const flowData = JSON.parse(flow.nodes);
+    const nodes = flowData.nodes || [];
+    const edges = flowData.edges || [];
+
+    const [userState] = await sql`SELECT * FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+    let currentNodeId = userState ? userState.current_node_id : null;
+    let variables = userState ? userState.variables : {};
+
+    if (userState && userState.waiting_for_input) {
+        variables[userState.waiting_for_input] = messageText;
+        await sql`UPDATE user_flow_states SET waiting_for_input = NULL, variables = ${JSON.stringify(variables)} WHERE id = ${userState.id}`;
+        currentNodeId = await findNextNode(currentNodeId, edges);
+    } else if (!userState) {
+        const startNode = nodes.find(n => n.data.label === 'Início');
+        currentNodeId = startNode ? await findNextNode(startNode.id, edges) : null;
+    }
+
+    let safetyLock = 0;
+    while (currentNodeId && safetyLock < 10) {
+        const currentNode = nodes.find(n => n.id === currentNodeId);
+        if (!currentNode) break;
+        
+        await sql`INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables) VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}) ON CONFLICT (chat_id, bot_id) DO UPDATE SET current_node_id = EXCLUDED.current_node_id, variables = EXCLUDED.variables`;
+
+        switch (currentNode.type) {
+            case 'message':
+                await sendMessage(chatId, currentNode.data.text, botToken);
+                currentNodeId = await findNextNode(currentNodeId, edges);
+                break;
+            
+            case 'collect_input':
+                await sql`UPDATE user_flow_states SET waiting_for_input = 'last_input' WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                currentNodeId = null; // Pausa o fluxo
+                break;
+
+            case 'action_pix':
+                const clickIdForPix = variables.last_input;
+                const valueInCents = currentNode.data.valueInCents || 1000;
+                if (!clickIdForPix) {
+                    await sendMessage(chatId, "⚠️ Erro: Não foi possível encontrar o Click ID para gerar o PIX.", botToken);
+                } else {
+                    try {
+                        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+                        const providerOrder = [seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary].filter(Boolean);
+                        let pixGenerated = false;
+                        for (const provider of providerOrder) {
+                            try {
+                                const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
+                                const pixMessage = `✅ PIX Gerado com sucesso!\n\nCopie o código abaixo:\n\n<code>${pixResult.qr_code_text}</code>`;
+                                await sendMessage(chatId, pixMessage, botToken);
+                                pixGenerated = true;
+                                break;
+                            } catch (e) {
+                                console.error(`[Flow Engine] Falha ao gerar PIX com ${provider} para ${clickIdForPix}:`, e.message);
+                            }
+                        }
+                        if (!pixGenerated) {
+                            await sendMessage(chatId, "❌ Desculpe, não foi possível gerar seu PIX no momento. Tente novamente mais tarde.", botToken);
+                        }
+                    } catch (error) {
+                        console.error("[Flow Engine] Erro crítico na ação de gerar PIX:", error);
+                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao gerar o PIX.", botToken);
+                    }
+                }
+                currentNodeId = await findNextNode(currentNodeId, edges);
+                break;
+
+            case 'action_city':
+                const clickIdForCity = variables.last_input;
+                 if (!clickIdForCity) {
+                    await sendMessage(chatId, "⚠️ Erro: Não foi possível encontrar o Click ID para consultar a cidade.", botToken);
+                } else {
+                    try {
+                         const db_click_id = clickIdForCity.startsWith('/start ') ? clickIdForCity : `/start ${clickIdForCity}`;
+                         const [clickInfo] = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${sellerId}`;
+                         if (clickInfo) {
+                            await sendMessage(chatId, `📍 Cidade encontrada: ${clickInfo.city} - ${clickInfo.state}`, botToken);
+                         } else {
+                            await sendMessage(chatId, `⚠️ Não encontrei informações de cidade para o ID informado.`, botToken);
+                         }
+                    } catch (error) {
+                        console.error("[Flow Engine] Erro na ação de consultar cidade:", error);
+                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao consultar a cidade.", botToken);
+                    }
+                }
+                currentNodeId = await findNextNode(currentNodeId, edges);
+                break;
+
+            default:
+                currentNodeId = null; // Tipo de nó desconhecido, para o fluxo
+                break;
+        }
+        safetyLock++;
+    }
+}
+
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
     const body = req.body;
-
-    res.sendStatus(200);
+    res.sendStatus(200); // Responde imediatamente ao Telegram
 
     try {
         const message = body.message;
         const chatId = message?.chat?.id;
-        if (!chatId) return;
+        if (!chatId || !message.text) return;
 
-        // --- SALVA O CHAT PRIMEIRO ---
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) { 
-            console.warn(`Webhook para botId não encontrado: ${botId}`);
+        if (!bot) {
+            console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`);
             return;
         }
+        const { seller_id: sellerId, bot_token: botToken } = bot;
+        
+        // Salva a mensagem recebida no histórico
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
-            VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${message.text.startsWith('/start ') ? message.text.split(' ')[1] : null}, ${message.text}, 'user')
+            VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${message.text.startsWith('/start ') ? message.text.split(' ')[1] : null}, ${message.text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
 
-        // --- MOTOR DO FLUXO ---
-        const [flow] = await sql`
-            SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
+        // Inicia o processamento do fluxo
+        await processFlow(chatId, botId, botToken, sellerId, message.text);
 
-        if (!flow || !flow.nodes) {
-            console.log(`Nenhum fluxo ativo para o bot ${botId}.`);
-            return;
-        }
-
-        const flowData = JSON.parse(flow.nodes);
-        const nodes = flowData.nodes || [];
-        const edges = flowData.edges || [];
-        
-        // Lógica de gatilho: encontra o nó inicial e o primeiro nó conectado a ele
-        const startNode = nodes.find(n => n.id === 'start' || (n.type === 'message' && n.data.label === 'Início'));
-        if (!startNode) return;
-        
-        const firstEdge = edges.find(e => e.source === startNode.id);
-        if (!firstEdge) return;
-        
-        const nextNode = nodes.find(n => n.id === firstEdge.target);
-        if (!nextNode) return;
-
-        if (nextNode.type === 'message' && nextNode.data.text) {
-            const apiUrl = `https://api.telegram.org/bot${bot.bot_token}/sendMessage`;
-            await axios.post(apiUrl, {
-                chat_id: chatId,
-                text: nextNode.data.text,
-            });
-        }
     } catch (error) {
-        console.error("Erro ao processar webhook ou gatilho do fluxo:", error);
+        console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
     }
 });
+
 
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
