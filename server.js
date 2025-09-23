@@ -681,6 +681,25 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o bot.' });
     }
 });
+
+app.put('/api/bots/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    const { bot_token } = req.body;
+    if (!bot_token) {
+        return res.status(400).json({ message: 'O token do bot é obrigatório.' });
+    }
+    try {
+        await sql`
+            UPDATE telegram_bots 
+            SET bot_token = ${bot_token} 
+            WHERE id = ${id} AND seller_id = ${req.user.id}`;
+        res.status(200).json({ message: 'Token do bot atualizado com sucesso.' });
+    } catch (error) {
+        console.error("Erro ao atualizar token do bot:", error);
+        res.status(500).json({ message: 'Erro ao atualizar o token do bot.' });
+    }
+});
+
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     const { bot_id } = req.body;
     if (!bot_id) return res.status(400).json({ message: 'ID do bot é obrigatório.' });
@@ -1360,11 +1379,9 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
                 return res.status(404).send('Bot not found'); 
             }
             await sql`
-                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id)
-                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId})
-                ON CONFLICT (chat_id) DO UPDATE SET
-                    user_id = EXCLUDED.user_id, first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
-                    username = EXCLUDED.username, click_id = COALESCE(telegram_chats.click_id, EXCLUDED.click_id);
+                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id, message_text)
+                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId}, ${message.text})
+                ON CONFLICT (chat_id, message_id) DO NOTHING;
             `;
         } catch (error) {
             console.error('Erro ao processar comando /start do Telegram:', error);
@@ -1719,10 +1736,10 @@ async function checkPendingTransactions() {
 // setInterval(checkPendingTransactions, 180000); 
 
 // ==========================================================
-//          ROTAS CORRIGIDAS PARA O CRIADOR DE FLUXOS
+//          ROTAS PARA O CRIADOR DE FLUXOS E CHAT
 // ==========================================================
 
-// Função auxiliar CORRIGIDA para criar a estrutura completa do fluxo
+// Função auxiliar para criar a estrutura completa do fluxo
 const createInitialFlowStructure = () => ({
     nodes: [{ id: 'start', type: 'message', position: { x: 50, y: 50 }, data: { label:'Início', text: 'Bem-vindo ao novo fluxo!' } }],
     edges: []
@@ -1733,11 +1750,9 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
     try {
         const flows = await sql`
             SELECT f.* FROM flows f
-            JOIN telegram_bots b ON f.bot_id = b.id
-            WHERE b.seller_id = ${req.user.id} 
+            WHERE f.seller_id = ${req.user.id} 
             ORDER BY f.created_at DESC`;
         
-        // Garante que o frontend sempre receba uma estrutura válida
         const safeFlows = flows.map(flow => ({
             ...flow,
             nodes: flow.nodes || JSON.stringify(createInitialFlowStructure())
@@ -1750,10 +1765,9 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
     }
 });
 
-// POST: Criar um novo fluxo (CORRIGIDO com seller_id)
+// POST: Criar um novo fluxo
 app.post('/api/flows', authenticateJwt, async (req, res) => {
     const { name, botId } = req.body;
-    // Pega o ID do usuário que está logado (vinda do token JWT)
     const sellerId = req.user.id; 
 
     if (!name || !botId) {
@@ -1763,7 +1777,6 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
     try {
         const initialFlow = createInitialFlowStructure();
         
-        // Adiciona o seller_id na inserção do banco de dados
         const [newFlow] = await sql`
             INSERT INTO flows (seller_id, bot_id, name, nodes) 
             VALUES (${sellerId}, ${botId}, ${name}, ${JSON.stringify(initialFlow)}) 
@@ -1776,23 +1789,20 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
     }
 });
 
-// PUT: Atualizar um fluxo existente (CORRIGIDO)
+// PUT: Atualizar um fluxo existente
 app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
-    // A variável 'nodes' aqui já é a string JSON enviada pelo frontend
     const { name, nodes } = req.body; 
     if (!name || !nodes) {
         return res.status(400).json({ message: 'Nome e estrutura de nós são obrigatórios.' });
     }
 
     try {
-        // Validação de segurança: garante que o fluxo pertence ao usuário logado
         const [updatedFlow] = await sql`
-            UPDATE flows f
+            UPDATE flows
             SET name = ${name}, nodes = ${nodes}, updated_at = CURRENT_TIMESTAMP
-            FROM telegram_bots b
-            WHERE f.id = ${id} AND f.bot_id = b.id AND b.seller_id = ${req.user.id}
-            RETURNING f.*;`;
+            WHERE id = ${id} AND seller_id = ${req.user.id}
+            RETURNING *;`;
             
         if (updatedFlow) {
             res.status(200).json(updatedFlow);
@@ -1806,27 +1816,74 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
 });
 
 // DELETE: Deletar um fluxo
-const deleteFlow = async () => {
-            if (currentFlow && confirm(`Tem certeza que deseja deletar o fluxo "${currentFlow.name}"?`)) {
-                try {
-                    await api.delete(`/flows/${currentFlow.id}`);
-                    // O código pode não chegar aqui se a resposta for 204, então movemos a lógica para baixo
-                    alert('Fluxo deletado com sucesso!');
-                    fetchFlowsForBot(selectedBotId);
-                } catch (error) {
-                    // VERIFICA SE O "ERRO" É NA VERDADE UM SUCESSO 204
-                    if (error.response && error.response.status === 204) {
-                        console.log('Fluxo deletado com sucesso (status 204). Atualizando a lista.');
-                        fetchFlowsForBot(selectedBotId);
-                    } else {
-                        // Se for um erro real (404, 500, etc.), mostra a mensagem
-                        const errorMessage = error.response?.data?.message || 'Não foi possível conectar ao servidor.';
-                        alert('Erro ao deletar fluxo: ' + errorMessage);
-                        console.error("Erro ao deletar fluxo:", error);
-                    }
-                }
-            }
-        };
+app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    const sellerId = req.user.id;
+
+    try {
+        const result = await sql`
+            DELETE FROM flows
+            WHERE id = ${id} AND seller_id = ${sellerId}`;
+        
+        if (result.count > 0) {
+            res.status(204).send();
+        } else {
+            res.status(404).json({ message: 'Fluxo não encontrado ou não autorizado.' });
+        }
+    } catch (error) {
+        console.error("Erro ao deletar fluxo:", error);
+        res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
+    }
+});
+
+
+// ROTAS PARA CHAT AO VIVO
+app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
+    const { botId } = req.params;
+    const sellerId = req.user.id;
+
+    try {
+        const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
+        }
+
+        const users = await sql`
+            SELECT DISTINCT ON (chat_id) 
+                   chat_id, first_name, last_name, username,
+                   (SELECT MAX(created_at) FROM telegram_chats tc2 WHERE tc2.chat_id = tc1.chat_id) as last_message_at
+            FROM telegram_chats tc1
+            WHERE bot_id = ${botId}
+            ORDER BY chat_id, last_message_at DESC;
+        `;
+        res.status(200).json(users);
+    } catch (error) {
+        console.error("Erro ao buscar usuários do chat:", error);
+        res.status(500).json({ message: 'Erro ao buscar usuários do chat.' });
+    }
+});
+
+app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
+    const { botId, chatId } = req.params;
+    const sellerId = req.user.id;
+
+    try {
+        const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
+        }
+
+        const messages = await sql`
+            SELECT * FROM telegram_chats 
+            WHERE bot_id = ${botId} AND chat_id = ${chatId}
+            ORDER BY created_at ASC;
+        `;
+        res.status(200).json(messages);
+    } catch (error) {
+        console.error("Erro ao buscar mensagens do chat:", error);
+        res.status(500).json({ message: 'Erro ao buscar mensagens do chat.' });
+    }
+});
 
 
 module.exports = app;
