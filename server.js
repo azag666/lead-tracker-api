@@ -1843,7 +1843,7 @@ async function checkPendingTransactions() {
 
 // Função auxiliar para criar a estrutura completa do fluxo
 const createInitialFlowStructure = () => ({
-    nodes: [{ id: 'start', type: 'message', position: { x: 100, y: 100 }, data: { label: 'Início', text: 'Gatilho: Novo Contato' } }],
+    nodes: [{ id: 'start', type: 'trigger', position: { x: 250, y: 50 }, data: {} }],
     edges: []
 });
 
