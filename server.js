@@ -1808,15 +1808,18 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
 // DELETE: Deletar um fluxo
 app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
+    const sellerId = req.user.id;
+
     try {
+        // Query simplificada: Deleta o fluxo SE o ID corresponder E o dono for o usuário logado.
         const result = await sql`
-            DELETE FROM flows f
-            USING telegram_bots b
-            WHERE f.id = ${id} AND f.bot_id = b.id AND b.seller_id = ${req.user.id}`;
+            DELETE FROM flows
+            WHERE id = ${id} AND seller_id = ${sellerId}`;
         
         if (result.count > 0) {
-            res.status(204).send(); // Sucesso
+            res.status(204).send(); // Sucesso, sem conteúdo
         } else {
+            // Se result.count for 0, o fluxo não foi encontrado ou o usuário não tem permissão
             res.status(404).json({ message: 'Fluxo não encontrado ou não autorizado.' });
         }
     } catch (error) {
