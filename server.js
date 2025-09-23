@@ -1864,10 +1864,10 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
 
         const users = await sql`
             SELECT DISTINCT ON (chat_id) 
-                   chat_id, first_name, last_name, username,
+                   chat_id, first_name, last_name, username, click_id,
                    (SELECT MAX(created_at) FROM telegram_chats tc2 WHERE tc2.chat_id = tc1.chat_id) as last_message_at
             FROM telegram_chats tc1
-            WHERE bot_id = ${botId}
+            WHERE bot_id = ${botId} AND sender_type = 'user'
             ORDER BY chat_id, last_message_at DESC;
         `;
         res.status(200).json(users);
@@ -1941,6 +1941,28 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
     } catch (error) {
         console.error("Erro ao enviar mensagem:", error);
         res.status(500).json({ message: 'Não foi possível enviar a mensagem.' });
+    }
+});
+
+// DELETE: Deletar uma conversa inteira
+app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
+    const { botId, chatId } = req.params;
+    const sellerId = req.user.id;
+
+    try {
+        const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        if (!bot) {
+            return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
+        }
+
+        await sql`
+            DELETE FROM telegram_chats 
+            WHERE bot_id = ${botId} AND chat_id = ${chatId} AND seller_id = ${sellerId}`;
+        
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao deletar conversa:", error);
+        res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
 
