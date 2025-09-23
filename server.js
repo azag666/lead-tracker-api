@@ -1355,13 +1355,27 @@ async function findNextNode(currentNodeId, edges) {
     return edge ? edge.target : null;
 }
 
-async function sendMessage(chatId, text, botToken) {
+async function sendMessage(chatId, text, botToken, sellerId, botId) {
     if (!text || text.trim() === '') return;
     const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
     try {
-        await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        const response = await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        
+        if (response.data.ok) {
+            const sentMessage = response.data.result;
+            const [botInfo] = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${botId}`;
+            const botName = botInfo ? botInfo.bot_name : 'Bot';
+
+            await sql`
+                INSERT INTO telegram_chats 
+                    (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, message_text, sender_type)
+                VALUES 
+                    (${sellerId}, ${botId}, ${chatId}, ${sentMessage.message_id}, ${sentMessage.from.id}, ${botName}, '(Fluxo)', ${text}, 'bot')
+                ON CONFLICT (chat_id, message_id) DO NOTHING;
+            `;
+        }
     } catch (error) {
-        console.error(`[Flow Engine] Erro ao enviar mensagem para ${chatId}:`, error.response?.data || error.message);
+        console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}:`, error.response?.data || error.message);
     }
 }
 
@@ -1377,7 +1391,6 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     let currentNodeId = userState ? userState.current_node_id : null;
     let variables = userState ? userState.variables : {};
 
-    // NOVO: Se for o início e tiver um click_id, salva-o.
     if (!userState && initialClickId) {
         variables.click_id = initialClickId;
     }
@@ -1400,15 +1413,15 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
 
         switch (currentNode.type) {
             case 'message':
-                await sendMessage(chatId, currentNode.data.text, botToken);
+                await sendMessage(chatId, currentNode.data.text, botToken, sellerId, botId);
                 currentNodeId = await findNextNode(currentNodeId, edges);
                 break;
 
             case 'action_pix':
-                const clickIdForPix = variables.click_id; // Usa o click_id salvo
+                const clickIdForPix = variables.click_id;
                 const valueInCents = currentNode.data.valueInCents || 1000;
                 if (!clickIdForPix) {
-                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para gerar o PIX.", botToken);
+                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para gerar o PIX.", botToken, sellerId, botId);
                 } else {
                     try {
                         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
@@ -1418,33 +1431,33 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                             try {
                                 const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
                                 const pixMessage = `✅ PIX Gerado com sucesso!\n\nCopie o código abaixo:\n\n<code>${pixResult.qr_code_text}</code>`;
-                                await sendMessage(chatId, pixMessage, botToken);
+                                await sendMessage(chatId, pixMessage, botToken, sellerId, botId);
                                 pixGenerated = true;
                                 break;
                             } catch (e) { console.error(`[Flow Engine] Falha ao gerar PIX com ${provider} para ${clickIdForPix}:`, e.message); }
                         }
-                        if (!pixGenerated) await sendMessage(chatId, "❌ Desculpe, não foi possível gerar seu PIX no momento.", botToken);
+                        if (!pixGenerated) await sendMessage(chatId, "❌ Desculpe, não foi possível gerar seu PIX no momento.", botToken, sellerId, botId);
                     } catch (error) {
                         console.error("[Flow Engine] Erro crítico na ação de gerar PIX:", error);
-                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao gerar o PIX.", botToken);
+                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao gerar o PIX.", botToken, sellerId, botId);
                     }
                 }
                 currentNodeId = await findNextNode(currentNodeId, edges);
                 break;
 
             case 'action_city':
-                const clickIdForCity = variables.click_id; // Usa o click_id salvo
+                const clickIdForCity = variables.click_id;
                  if (!clickIdForCity) {
-                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para consultar a cidade.", botToken);
+                    await sendMessage(chatId, "⚠️ Erro: Click ID do lead não encontrado para consultar a cidade.", botToken, sellerId, botId);
                 } else {
                     try {
                          const db_click_id = clickIdForCity.startsWith('/start ') ? clickIdForCity : `/start ${clickIdForCity}`;
                          const [clickInfo] = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${sellerId}`;
-                         if (clickInfo) await sendMessage(chatId, `📍 Cidade encontrada: ${clickInfo.city} - ${clickInfo.state}`, botToken);
-                         else await sendMessage(chatId, `⚠️ Não encontrei informações de cidade para o ID informado.`, botToken);
+                         if (clickInfo) await sendMessage(chatId, `📍 Cidade encontrada: ${clickInfo.city} - ${clickInfo.state}`, botToken, sellerId, botId);
+                         else await sendMessage(chatId, `⚠️ Não encontrei informações de cidade para o ID informado.`, botToken, sellerId, botId);
                     } catch (error) {
                         console.error("[Flow Engine] Erro na ação de consultar cidade:", error);
-                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao consultar a cidade.", botToken);
+                        await sendMessage(chatId, "❌ Ocorreu um erro interno ao consultar a cidade.", botToken, sellerId, botId);
                     }
                 }
                 currentNodeId = await findNextNode(currentNodeId, edges);
