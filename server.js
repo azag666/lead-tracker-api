@@ -1935,6 +1935,52 @@ app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar mensagens do chat.' });
     }
 });
+// ROTA NOVA: Enviar mensagem para um usuário do chat
+app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => {
+    const { botId } = req.params;
+    const { chatId, text } = req.body;
+    const sellerId = req.user.id;
 
+    if (!chatId || !text) {
+        return res.status(400).json({ message: 'Chat ID e texto da mensagem são obrigatórios.' });
+    }
+
+    try {
+        // Busca o bot para garantir a posse e pegar o token
+        const [bot] = await sql`
+            SELECT bot_token, (SELECT name FROM sellers WHERE id = ${sellerId}) as seller_name 
+            FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        
+        if (!bot || !bot.bot_token) {
+            return res.status(404).json({ message: 'Bot não encontrado ou sem token.' });
+        }
+
+        // 1. Envia a mensagem para a API do Telegram
+        const telegramApiUrl = `https://api.telegram.org/bot${bot.bot_token}/sendMessage`;
+        const response = await axios.post(telegramApiUrl, {
+            chat_id: chatId,
+            text: text,
+        });
+
+        // 2. Salva a mensagem enviada no nosso banco de dados para manter o histórico
+        if (response.data.ok) {
+            const sentMessage = response.data.result;
+            await sql`
+                INSERT INTO telegram_chats 
+                    (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, message_text, sender_type)
+                VALUES 
+                    (${sellerId}, ${botId}, ${chatId}, ${sentMessage.message_id}, ${sellerId}, ${bot.seller_name}, '(Operador)', ${text}, 'operator')
+                ON CONFLICT (chat_id, message_id) DO NOTHING;
+            `;
+            res.status(200).json({ message: 'Mensagem enviada com sucesso!' });
+        } else {
+            throw new Error('Telegram API retornou um erro.');
+        }
+
+    } catch (error) {
+        console.error("Erro ao enviar mensagem:", error);
+        res.status(500).json({ message: 'Não foi possível enviar a mensagem.' });
+    }
+});
 
 module.exports = app;
