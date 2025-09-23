@@ -1806,27 +1806,27 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
 });
 
 // DELETE: Deletar um fluxo
-app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
-    const { id } = req.params;
-    const sellerId = req.user.id;
-
-    try {
-        // Query simplificada: Deleta o fluxo SE o ID corresponder E o dono for o usuário logado.
-        const result = await sql`
-            DELETE FROM flows
-            WHERE id = ${id} AND seller_id = ${sellerId}`;
-        
-        if (result.count > 0) {
-            res.status(204).send(); // Sucesso, sem conteúdo
-        } else {
-            // Se result.count for 0, o fluxo não foi encontrado ou o usuário não tem permissão
-            res.status(404).json({ message: 'Fluxo não encontrado ou não autorizado.' });
-        }
-    } catch (error) {
-        console.error("Erro ao deletar fluxo:", error);
-        res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
-    }
-});
+const deleteFlow = async () => {
+            if (currentFlow && confirm(`Tem certeza que deseja deletar o fluxo "${currentFlow.name}"?`)) {
+                try {
+                    await api.delete(`/flows/${currentFlow.id}`);
+                    // O código pode não chegar aqui se a resposta for 204, então movemos a lógica para baixo
+                    alert('Fluxo deletado com sucesso!');
+                    fetchFlowsForBot(selectedBotId);
+                } catch (error) {
+                    // VERIFICA SE O "ERRO" É NA VERDADE UM SUCESSO 204
+                    if (error.response && error.response.status === 204) {
+                        console.log('Fluxo deletado com sucesso (status 204). Atualizando a lista.');
+                        fetchFlowsForBot(selectedBotId);
+                    } else {
+                        // Se for um erro real (404, 500, etc.), mostra a mensagem
+                        const errorMessage = error.response?.data?.message || 'Não foi possível conectar ao servidor.';
+                        alert('Erro ao deletar fluxo: ' + errorMessage);
+                        console.error("Erro ao deletar fluxo:", error);
+                    }
+                }
+            }
+        };
 
 
 module.exports = app;
