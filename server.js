@@ -1306,6 +1306,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
 
+    // Lógica para botões (callback_query) permanece a mesma
     if (req.body.callback_query) {
         const { callback_query } = req.body;
         const chatId = callback_query.message.chat.id;
@@ -1358,35 +1359,38 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         return res.sendStatus(200);
     }
 
+    // Lógica para mensagens de texto
     const { message } = req.body;
     
+    // Ignora qualquer coisa que não seja uma mensagem de texto em um chat privado
     if (!message || !message.text || !message.chat || message.chat.id < 0) {
         return res.sendStatus(200);
     }
 
-    if (message.text.startsWith('/start ')) {
-        const chatId = message.chat.id;
-        const userId = message.from.id;
-        const firstName = message.from.first_name;
-        const lastName = message.from.last_name || null;
-        const username = message.from.username || null;
-        const clickId = message.text.split(' ')[1] || null;
+    // Processa TODAS as mensagens de texto
+    const chatId = message.chat.id;
+    const messageId = message.message_id;
+    const userId = message.from.id;
+    const firstName = message.from.first_name;
+    const lastName = message.from.last_name || null;
+    const username = message.from.username || null;
+    const messageText = message.text;
+    const clickId = message.text.startsWith('/start ') ? message.text.split(' ')[1] : null;
 
-        try {
-            const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
-            if (!bot) { 
-                console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
-                return res.status(404).send('Bot not found'); 
-            }
-            await sql`
-                INSERT INTO telegram_chats (seller_id, bot_id, chat_id, user_id, first_name, last_name, username, click_id, message_text)
-                VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId}, ${message.text})
-                ON CONFLICT (chat_id, message_id) DO NOTHING;
-            `;
-        } catch (error) {
-            console.error('Erro ao processar comando /start do Telegram:', error);
-            return res.sendStatus(500);
+    try {
+        const [bot] = await sql`SELECT seller_id FROM telegram_bots WHERE id = ${botId}`;
+        if (!bot) { 
+            console.warn(`Webhook para botId não encontrado no banco de dados: ${botId}`);
+            return res.status(404).send('Bot not found'); 
         }
+
+        await sql`
+            INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text)
+            VALUES (${bot.seller_id}, ${botId}, ${chatId}, ${messageId}, ${userId}, ${firstName}, ${lastName}, ${username}, ${clickId}, ${messageText})
+            ON CONFLICT (chat_id, message_id) DO NOTHING;
+        `;
+    } catch (error) {
+        console.error('Erro ao processar webhook do Telegram:', error);
     }
     
     res.sendStatus(200);
