@@ -1369,7 +1369,9 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
     if (!flow || !flow.nodes) return;
 
-    const flowData = JSON.parse(flow.nodes);
+    // AQUI ESTÁ A CORREÇÃO: Verifica se flow.nodes é um texto antes de usar JSON.parse
+    const flowData = typeof flow.nodes === 'string' ? JSON.parse(flow.nodes) : flow.nodes;
+    
     const nodes = flowData.nodes || [];
     const edges = flowData.edges || [];
 
