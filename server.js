@@ -1719,13 +1719,13 @@ async function checkPendingTransactions() {
 // setInterval(checkPendingTransactions, 180000); 
 
 // ==========================================================
-//          NOVAS ROTAS PARA O CRIADOR DE FLUXOS
-//        *** TOTALMENTE SEPARADO DAS PRESSELS ***
+//          ROTAS CORRIGIDAS PARA O CRIADOR DE FLUXOS
 // ==========================================================
 
-// Função auxiliar para o fluxo inicial
-const createInitialFlowNodes = () => ({
-    nodes: [{ id: 1, type: 'start', content: 'Início do Fluxo', position: { x: 50, y: 150 }, outputs: [{ id: 'out', nextStepId: null }] }]
+// Função auxiliar CORRIGIDA para criar a estrutura completa do fluxo
+const createInitialFlowStructure = () => ({
+    nodes: [{ id: 'start', type: 'message', position: { x: 50, y: 50 }, data: { label:'Início', text: 'Bem-vindo ao novo fluxo!' } }],
+    edges: []
 });
 
 // GET: Buscar todos os fluxos de um usuário
@@ -1737,9 +1737,10 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
             WHERE b.seller_id = ${req.user.id} 
             ORDER BY f.created_at DESC`;
         
+        // Garante que o frontend sempre receba uma estrutura válida
         const safeFlows = flows.map(flow => ({
             ...flow,
-            nodes: flow.nodes || createInitialFlowNodes().nodes
+            nodes: flow.nodes || JSON.stringify(createInitialFlowStructure())
         }));
 
         res.status(200).json(safeFlows);
@@ -1749,7 +1750,7 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
     }
 });
 
-// POST: Criar um novo fluxo
+// POST: Criar um novo fluxo (CORRIGIDO)
 app.post('/api/flows', authenticateJwt, async (req, res) => {
     const { name, botId } = req.body;
     if (!name || !botId) {
@@ -1757,11 +1758,15 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
     }
     
     try {
-        const initialNodes = createInitialFlowNodes();
+        // Usa a função auxiliar para criar a estrutura completa {nodes, edges}
+        const initialFlow = createInitialFlowStructure();
+        
+        // Insere a estrutura completa como uma string JSON no banco de dados
         const [newFlow] = await sql`
             INSERT INTO flows (bot_id, name, nodes) 
-            VALUES (${botId}, ${name}, ${JSON.stringify(initialNodes.nodes)}) 
+            VALUES (${botId}, ${name}, ${JSON.stringify(initialFlow)}) 
             RETURNING *;`;
+            
         res.status(201).json(newFlow);
     } catch (error) {
         console.error("Erro ao criar fluxo:", error);
@@ -1769,10 +1774,11 @@ app.post('/api/flows', authenticateJwt, async (req, res) => {
     }
 });
 
-// PUT: Atualizar um fluxo existente
+// PUT: Atualizar um fluxo existente (CORRIGIDO)
 app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
-    const { name, nodes } = req.body;
+    // A variável 'nodes' aqui já é a string JSON enviada pelo frontend
+    const { name, nodes } = req.body; 
     if (!name || !nodes) {
         return res.status(400).json({ message: 'Nome e estrutura de nós são obrigatórios.' });
     }
@@ -1781,7 +1787,7 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
         // Validação de segurança: garante que o fluxo pertence ao usuário logado
         const [updatedFlow] = await sql`
             UPDATE flows f
-            SET name = ${name}, nodes = ${JSON.stringify(nodes)}, updated_at = CURRENT_TIMESTAMP
+            SET name = ${name}, nodes = ${nodes}, updated_at = CURRENT_TIMESTAMP
             FROM telegram_bots b
             WHERE f.id = ${id} AND f.bot_id = b.id AND b.seller_id = ${req.user.id}
             RETURNING f.*;`;
