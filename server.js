@@ -652,6 +652,9 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o pixel.' });
     }
 });
+
+// --- ROTAS DE GERENCIAMENTO DE BOTS (COM ADIÇÕES) ---
+
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const { bot_name } = req.body;
     if (!bot_name) {
@@ -672,6 +675,7 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
 });
+
 app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     try {
         await sql`DELETE FROM telegram_bots WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
@@ -682,12 +686,14 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     }
 });
 
+// ROTA ATUALIZADA - Para Editar Token
 app.put('/api/bots/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
-    const { bot_token } = req.body;
+    let { bot_token } = req.body;
     if (!bot_token) {
         return res.status(400).json({ message: 'O token do bot é obrigatório.' });
     }
+    bot_token = bot_token.trim(); // Limpa espaços extras
     try {
         await sql`
             UPDATE telegram_bots 
@@ -697,6 +703,44 @@ app.put('/api/bots/:id', authenticateJwt, async (req, res) => {
     } catch (error) {
         console.error("Erro ao atualizar token do bot:", error);
         res.status(500).json({ message: 'Erro ao atualizar o token do bot.' });
+    }
+});
+
+// ROTA NOVA - Para Configurar Webhook
+app.post('/api/bots/:id/set-webhook', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    const sellerId = req.user.id;
+    try {
+        const [bot] = await sql`
+            SELECT bot_token FROM telegram_bots 
+            WHERE id = ${id} AND seller_id = ${sellerId}`;
+
+        if (!bot || !bot.bot_token || bot.bot_token.trim() === '') {
+            return res.status(400).json({ message: 'O token do bot não está configurado. Salve um token válido primeiro.' });
+        }
+
+        const token = bot.bot_token.trim();
+        const webhookUrl = `https://novaapi-one.vercel.app/api/webhook/telegram/${id}`;
+        const telegramApiUrl = `https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`;
+        
+        const response = await axios.get(telegramApiUrl);
+
+        if (response.data.ok) {
+            res.status(200).json({ message: 'Webhook configurado com sucesso!' });
+        } else {
+            throw new Error(response.data.description);
+        }
+    } catch (error) {
+        console.error("Erro ao configurar webhook:", error);
+        if (error.isAxiosError && error.response) {
+            const status = error.response.status;
+            const telegramMessage = error.response.data?.description || 'Resposta inválida do Telegram.';
+            if (status === 401 || status === 404) {
+                return res.status(400).json({ message: `O Telegram rejeitou seu token: "${telegramMessage}". Verifique se o token está correto.` });
+            }
+            return res.status(500).json({ message: `Erro de comunicação com o Telegram: ${telegramMessage}` });
+        }
+        res.status(500).json({ message: `Erro interno no servidor: ${error.message}` });
     }
 });
 
@@ -735,6 +779,7 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: errorMessage });
     }
 });
+
 app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     const { botIds } = req.query; 
 
@@ -1303,6 +1348,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
         });
     }
 });
+
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
 
@@ -1395,6 +1441,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
     
     res.sendStatus(200);
 });
+
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
         const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
