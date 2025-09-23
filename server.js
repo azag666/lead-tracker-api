@@ -1750,21 +1750,23 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
     }
 });
 
-// POST: Criar um novo fluxo (CORRIGIDO)
+// POST: Criar um novo fluxo (CORRIGIDO com seller_id)
 app.post('/api/flows', authenticateJwt, async (req, res) => {
     const { name, botId } = req.body;
+    // Pega o ID do usuário que está logado (vinda do token JWT)
+    const sellerId = req.user.id; 
+
     if (!name || !botId) {
         return res.status(400).json({ message: 'Nome do fluxo e ID do bot são obrigatórios.' });
     }
     
     try {
-        // Usa a função auxiliar para criar a estrutura completa {nodes, edges}
         const initialFlow = createInitialFlowStructure();
         
-        // Insere a estrutura completa como uma string JSON no banco de dados
+        // Adiciona o seller_id na inserção do banco de dados
         const [newFlow] = await sql`
-            INSERT INTO flows (bot_id, name, nodes) 
-            VALUES (${botId}, ${name}, ${JSON.stringify(initialFlow)}) 
+            INSERT INTO flows (seller_id, bot_id, name, nodes) 
+            VALUES (${sellerId}, ${botId}, ${name}, ${JSON.stringify(initialFlow)}) 
             RETURNING *;`;
             
         res.status(201).json(newFlow);
