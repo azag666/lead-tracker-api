@@ -710,10 +710,10 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
     }
     try {
         const [newBot] = await sql`
-            INSERT INTO telegram_bots (seller_id, bot_name, bot_token) 
-            VALUES (${req.user.id}, ${bot_name}, '') 
-            RETURNING *;
-        `;
+    INSERT INTO telegram_bots (seller_id, bot_name, bot_token) 
+    VALUES (${req.user.id}, ${bot_name}, NULL) 
+    RETURNING *;
+    `;
         res.status(201).json(newBot);
     } catch (error) {
         if (error.code === '23505' && error.constraint_name === 'telegram_bots_bot_name_key') {
