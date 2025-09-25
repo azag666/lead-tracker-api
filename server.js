@@ -709,13 +709,18 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
         return res.status(400).json({ message: 'O nome do bot é obrigatório.' });
     }
     try {
+        // Gera um token placeholder único para satisfazer as regras do banco
+        const placeholderToken = uuidv4();
+
         const [newBot] = await sql`
-    INSERT INTO telegram_bots (seller_id, bot_name, bot_token) 
-    VALUES (${req.user.id}, ${bot_name}, NULL) 
-    RETURNING *;
-    `;
+            INSERT INTO telegram_bots (seller_id, bot_name, bot_token) 
+            VALUES (${req.user.id}, ${bot_name}, ${placeholderToken}) 
+            RETURNING *;
+        `;
         res.status(201).json(newBot);
     } catch (error) {
+        // O erro de token duplicado não deve mais ocorrer com o UUID,
+        // mas o tratamento para nome duplicado continua importante.
         if (error.code === '23505' && error.constraint_name === 'telegram_bots_bot_name_key') {
             return res.status(409).json({ message: 'Um bot com este nome de usuário já existe.' });
         }
