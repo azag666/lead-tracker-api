@@ -14,6 +14,8 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const activeTimeouts = new Map(); // Gerencia os timeouts de 'sem resposta'
+
 // --- OTIMIZAÇÃO CRÍTICA: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
 const sql = neon(process.env.DATABASE_URL);
 
@@ -1377,7 +1379,8 @@ async function sendMessage(chatId, text, botToken, sellerId, botId) {
     }
 }
 
-async function processFlow(chatId, botId, botToken, sellerId, messageText = null, isNewUserWithClickId = false, clickIdValue = null) {
+async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null, initialVariables = {}) {
+    console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}`);
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
     if (!flow || !flow.nodes) {
         console.log(`[Flow Engine] Nenhum fluxo ativo encontrado para o bot ID ${botId}.`);
@@ -1388,34 +1391,28 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     const nodes = flowData.nodes || [];
     const edges = flowData.edges || [];
 
-    const [userState] = await sql`SELECT * FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-    let currentNodeId = null;
-    let variables = userState ? userState.variables : {};
+    let currentNodeId = startNodeId;
+    let variables = initialVariables;
 
-   if (userState && userState.waiting_for_input) {
-    // O usuário está respondendo a uma pergunta, continuamos o fluxo
-    console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id}.`);
-    variables['user_reply'] = messageText;
-    await sql`UPDATE user_flow_states SET waiting_for_input = false, variables = ${JSON.stringify(variables)} WHERE id = ${userState.id}`;
-    currentNodeId = findNextNode(userState.current_node_id, 'a', edges);
-
-} else {
-    // É um novo usuário OU um usuário existente iniciando/reiniciando a conversa
-    console.log(`[Flow Engine] Iniciando/Reiniciando fluxo para o usuário ${chatId}.`);
-    if (isNewUserWithClickId) {
-        variables.click_id = clickIdValue;
+    // Se nenhum nó de início foi especificado, buscamos o estado do usuário ou começamos do zero.
+    if (!currentNodeId) {
+        const [userState] = await sql`SELECT * FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+        if (userState && userState.waiting_for_input) {
+            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id} pelo caminho 'com resposta'.`);
+            currentNodeId = findNextNode(userState.current_node_id, 'a', edges); // 'a' é a saída padrão de resposta
+            variables = userState.variables;
+        } else {
+            console.log(`[Flow Engine] Iniciando novo fluxo para ${chatId} a partir do gatilho.`);
+            const startNode = nodes.find(node => node.type === 'trigger');
+            if (startNode) {
+                currentNodeId = findNextNode(startNode.id, null, edges);
+            }
+        }
     }
-    const startNode = nodes.find(node => node.type === 'trigger');
-    if (startNode) {
-        currentNodeId = findNextNode(startNode.id, null, edges);
-    }
-}
 
     if (!currentNodeId) {
         console.log(`[Flow Engine] Fim do fluxo ou nenhum nó inicial encontrado para ${chatId}.`);
-        if (userState) {
-             await sql`DELETE FROM user_flow_states WHERE id = ${userState.id}`;
-        }
+        await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
         return;
     }
 
@@ -1423,14 +1420,14 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     while (currentNodeId && safetyLock < 15) {
         const currentNode = nodes.find(node => node.id === currentNodeId);
         if (!currentNode) {
-             console.error(`[Flow Engine] Erro: Nó ${currentNodeId} não encontrado no fluxo.`);
-             break;
+            console.error(`[Flow Engine] Erro: Nó ${currentNodeId} não encontrado no fluxo.`);
+            break;
         }
-        
+
         await sql`
-            INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables, waiting_for_input) 
-            VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}, false) 
-            ON CONFLICT (chat_id, bot_id) 
+            INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables, waiting_for_input)
+            VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}, false)
+            ON CONFLICT (chat_id, bot_id)
             DO UPDATE SET current_node_id = EXCLUDED.current_node_id, variables = EXCLUDED.variables, waiting_for_input = false;
         `;
 
@@ -1440,40 +1437,61 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
                     await new Promise(resolve => setTimeout(resolve, currentNode.data.typingDelay * 1000));
                 }
                 await sendMessage(chatId, currentNode.data.text, botToken, sellerId, botId);
-                
+
                 if (currentNode.data.waitForReply) {
-                    console.log(`[Flow Engine] Fluxo para ${chatId} pausado no nó ${currentNodeId}, aguardando resposta.`);
+                    console.log(`[Flow Engine] Fluxo para ${chatId} pausado no nó ${currentNode.id}, aguardando resposta.`);
                     await sql`UPDATE user_flow_states SET waiting_for_input = true WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    currentNodeId = null;
+                    
+                    const timeoutMinutes = currentNode.data.replyTimeout || 5; // Padrão de 5 minutos se não definido
+                    const timeoutMilliseconds = timeoutMinutes * 60 * 1000;
+                    
+                    console.log(`[Flow Engine] Agendando ação de 'sem resposta' em ${timeoutMinutes} minutos.`);
+                    
+                    const timeoutId = setTimeout(async () => {
+                        console.log(`[Flow Engine] Timeout atingido para ${chatId}. Verificando se deve continuar.`);
+                        activeTimeouts.delete(chatId); // Limpa o registro do timeout
+                        
+                        const [currentUserState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                        
+                        // Apenas continua se o estado ainda for 'esperando por input', garantindo que o usuário não respondeu no último segundo.
+                        if (currentUserState && currentUserState.waiting_for_input) {
+                            console.log(`[Flow Engine] Usuário ${chatId} não respondeu. Continuando pelo caminho 'sem resposta'.`);
+                            const noReplyNodeId = findNextNode(currentNode.id, 'b', edges); // 'b' é a saída de 'sem resposta'
+                            if (noReplyNodeId) {
+                                await processFlow(chatId, botId, botToken, sellerId, noReplyNodeId, variables);
+                            } else {
+                                await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                            }
+                        }
+                    }, timeoutMilliseconds);
+
+                    activeTimeouts.set(chatId, timeoutId);
+                    
+                    currentNodeId = null; // Para o loop while atual
                 } else {
                     currentNodeId = findNextNode(currentNodeId, 'a', edges);
                 }
                 break;
-            
-            // ... (outros 'case' para action_pix, action_city, etc. permanecem aqui)
-            case 'action_pix':
-                // ...
-                currentNodeId = findNextNode(currentNodeId, null, edges);
-                break;
-            case 'action_city':
-                // ...
-                currentNodeId = findNextNode(currentNodeId, null, edges);
-                break;
+
             case 'delay':
                 const delaySeconds = currentNode.data.delayInSeconds || 1;
                 await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
-
+            
+            // ... (outros 'case' para action_pix, action_city, etc. podem ser adicionados aqui da mesma forma que antes)
+            
             default:
-                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Parando fluxo.`);
-                currentNodeId = null;
+                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Continuando pelo próximo nó padrão.`);
+                currentNodeId = findNextNode(currentNodeId, null, edges); // Tenta continuar se possível
                 break;
         }
 
         if (!currentNodeId) {
-            console.log(`[Flow Engine] Fim do ramo do fluxo para o usuário ${chatId}.`);
-            await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            console.log(`[Flow Engine] Fim do ramo do fluxo para o usuário ${chatId}. Aguardando próxima interação ou timeout.`);
+            if (!activeTimeouts.has(chatId)) {
+                 await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            }
         }
         safetyLock++;
     }
@@ -1488,6 +1506,12 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         const message = body.message;
         const chatId = message?.chat?.id;
         if (!chatId || !message.text) return;
+        
+        if (activeTimeouts.has(chatId)) {
+            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Cancelando timeout agendado.`);
+            clearTimeout(activeTimeouts.get(chatId));
+            activeTimeouts.delete(chatId);
+        }
 
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
         if (!bot) {
@@ -1511,7 +1535,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         
         const isNewUserInteraction = !existingUser && isStartCommand;
         
-        await processFlow(chatId, botId, botToken, sellerId, text, isNewUserInteraction, clickIdValue);
+        await processFlow(chatId, botId, botToken, sellerId, null, isNewUserInteraction ? { click_id: clickIdValue } : {});
 
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
