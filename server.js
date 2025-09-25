@@ -1376,8 +1376,19 @@ async function sendMessage(chatId, text, botToken, sellerId, botId) {
     const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
     try {
         await sendTypingAction(chatId, botToken);
-        // Pequeno atraso para o "typing" ser visível
-        await new Promise(resolve => setTimeout(resolve, 750));
+        
+        // --- INÍCIO DA OTIMIZAÇÃO ---
+        // Calcula um delay dinâmico baseado no tamanho da mensagem
+        // Média de 50ms por caractere, para simular digitação
+        let typingDuration = text.length * 50;
+
+        // Garante que o delay mínimo seja de 500ms e o máximo de 2 segundos
+        typingDuration = Math.max(500, typingDuration); // Mínimo de 0.5 segundos
+        typingDuration = Math.min(2000, typingDuration); // Máximo de 2 segundos
+
+        // Aguarda o tempo de digitação calculado
+        await new Promise(resolve => setTimeout(resolve, typingDuration));
+        // --- FIM DA OTIMIZAÇÃO ---
 
         const response = await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
         
@@ -1396,7 +1407,6 @@ async function sendMessage(chatId, text, botToken, sellerId, botId) {
         console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}:`, error.response?.data || error.message);
     }
 }
-
 async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null, initialVariables = {}) {
     console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}`);
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
