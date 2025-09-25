@@ -19,9 +19,11 @@ const sql = neon(process.env.DATABASE_URL);
 
 // --- ROTA DO CRON JOB ---
 app.post('/api/cron/process-timeouts', async (req, res) => {
-    // A verificação de segurança foi removida para teste.
-    // Lembre-se de adicionar um método de segurança compatível com a Vercel se necessário.
-    
+    const cronSecret = process.env.CRON_SECRET;
+    if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {
+        return res.status(401).send('Unauthorized');
+    }
+
     try {
 //...
     }
