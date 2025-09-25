@@ -1929,6 +1929,8 @@ app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
     }
 });
+
+// ========= ROTA DO CHAT CORRIGIDA E OTIMIZADA =========
 app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const sellerId = req.user.id;
@@ -1939,19 +1941,21 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
 
+        // Query mais eficiente que pega o último registro de cada chat_id diretamente
         const users = await sql`
-            SELECT DISTINCT ON (chat_id) 
-                   chat_id, first_name, last_name, username, click_id,
-                   created_at as last_message_at
-            FROM telegram_chats
-            WHERE bot_id = ${botId} AND seller_id = ${sellerId}
-            ORDER BY chat_id, created_at DESC;
+            SELECT tc1.*
+            FROM telegram_chats tc1
+            INNER JOIN (
+                SELECT chat_id, MAX(created_at) AS max_created_at
+                FROM telegram_chats
+                WHERE bot_id = ${botId} AND seller_id = ${sellerId}
+                GROUP BY chat_id
+            ) tc2 ON tc1.chat_id = tc2.chat_id AND tc1.created_at = tc2.max_created_at
+            WHERE tc1.bot_id = ${botId} AND tc1.seller_id = ${sellerId}
+            ORDER BY tc1.created_at DESC;
         `;
         
-        // Ordena os resultados no javascript pela data da última mensagem para garantir a ordem correta na UI
-        const sortedUsers = users.sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
-
-        res.status(200).json(sortedUsers);
+        res.status(200).json(users);
     } catch (error) {
         console.error("Erro ao buscar usuários do chat:", error);
         res.status(500).json({ message: 'Erro ao buscar usuários do chat.' });
