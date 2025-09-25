@@ -182,6 +182,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     }
 }
 
+// CORREÇÃO: Função checkAndAwardAchievements foi removida da chamada pois não estava definida.
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
@@ -216,7 +217,7 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-            await checkAndAwardAchievements(seller.id); 
+            // await checkAndAwardAchievements(seller.id); // Esta linha foi a causa do erro anterior e foi comentada.
         } else {
             console.error(`[handleSuccessfulPayment] ERRO: Não foi possível encontrar dados do clique ou vendedor para a transação ${transaction_id}`);
         }
@@ -1350,17 +1351,34 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 // ==========================================================
-//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (CORRIGIDO)
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (ATUALIZADO)
 // ==========================================================
 function findNextNode(currentNodeId, handleId, edges) {
-    const edge = edges.find(edge => edge.source === currentNodeId && edge.sourceHandle === handleId);
+    // Para nós com apenas uma saída (delay, action_pix), o handleId pode ser nulo.
+    // Para nós com múltiplas saídas (message, action_check_pix), o handleId é 'a' ou 'b'.
+    const edge = edges.find(edge => edge.source === currentNodeId && (edge.sourceHandle === handleId || !edge.sourceHandle));
     return edge ? edge.target : null;
+}
+
+async function sendTypingAction(chatId, botToken) {
+    try {
+        await axios.post(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
+            chat_id: chatId,
+            action: 'typing',
+        });
+    } catch (error) {
+        console.warn(`[Flow Engine] Falha ao enviar ação 'typing' para ${chatId}:`, error.response?.data || error.message);
+    }
 }
 
 async function sendMessage(chatId, text, botToken, sellerId, botId) {
     if (!text || text.trim() === '') return;
     const apiUrl = `https://api.telegram.org/bot${botToken}/sendMessage`;
     try {
+        await sendTypingAction(chatId, botToken);
+        // Pequeno atraso para o "typing" ser visível
+        await new Promise(resolve => setTimeout(resolve, 750));
+
         const response = await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
         
         if (response.data.ok) {
@@ -1417,19 +1435,25 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     }
 
     let safetyLock = 0;
-    while (currentNodeId && safetyLock < 15) {
+    while (currentNodeId && safetyLock < 20) { // Aumentado o safety lock
         const currentNode = nodes.find(node => node.id === currentNodeId);
         if (!currentNode) {
             console.error(`[Flow Engine] Erro: Nó ${currentNodeId} não encontrado no fluxo.`);
             break;
         }
 
+        // Atualiza o estado atual do usuário no banco
         await sql`
             INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables, waiting_for_input)
             VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}, false)
             ON CONFLICT (chat_id, bot_id)
             DO UPDATE SET current_node_id = EXCLUDED.current_node_id, variables = EXCLUDED.variables, waiting_for_input = false;
         `;
+
+        // Envia ação "digitando..." para nós que envolvem espera ou resposta do bot
+        if (['message', 'delay', 'action_pix', 'action_check_pix'].includes(currentNode.type)) {
+            await sendTypingAction(chatId, botToken);
+        }
 
         switch (currentNode.type) {
             case 'message':
@@ -1439,35 +1463,24 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
                 await sendMessage(chatId, currentNode.data.text, botToken, sellerId, botId);
 
                 if (currentNode.data.waitForReply) {
-                    console.log(`[Flow Engine] Fluxo para ${chatId} pausado no nó ${currentNode.id}, aguardando resposta.`);
                     await sql`UPDATE user_flow_states SET waiting_for_input = true WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    
-                    const timeoutMinutes = currentNode.data.replyTimeout || 5; // Padrão de 5 minutos se não definido
+                    const timeoutMinutes = currentNode.data.replyTimeout || 5;
                     const timeoutMilliseconds = timeoutMinutes * 60 * 1000;
                     
-                    console.log(`[Flow Engine] Agendando ação de 'sem resposta' em ${timeoutMinutes} minutos.`);
-                    
                     const timeoutId = setTimeout(async () => {
-                        console.log(`[Flow Engine] Timeout atingido para ${chatId}. Verificando se deve continuar.`);
-                        activeTimeouts.delete(chatId); // Limpa o registro do timeout
-                        
+                        activeTimeouts.delete(chatId);
                         const [currentUserState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
                         
-                        // Apenas continua se o estado ainda for 'esperando por input', garantindo que o usuário não respondeu no último segundo.
                         if (currentUserState && currentUserState.waiting_for_input) {
-                            console.log(`[Flow Engine] Usuário ${chatId} não respondeu. Continuando pelo caminho 'sem resposta'.`);
                             const noReplyNodeId = findNextNode(currentNode.id, 'b', edges); // 'b' é a saída de 'sem resposta'
                             if (noReplyNodeId) {
                                 await processFlow(chatId, botId, botToken, sellerId, noReplyNodeId, variables);
-                            } else {
-                                await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
                             }
                         }
                     }, timeoutMilliseconds);
 
                     activeTimeouts.set(chatId, timeoutId);
-                    
-                    currentNodeId = null; // Para o loop while atual
+                    currentNodeId = null; // Para o loop
                 } else {
                     currentNodeId = findNextNode(currentNodeId, 'a', edges);
                 }
@@ -1479,16 +1492,68 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
             
-            // ... (outros 'case' para action_pix, action_city, etc. podem ser adicionados aqui da mesma forma que antes)
-            
+            case 'action_pix':
+                try {
+                    const valueInCents = currentNode.data.valueInCents;
+                    if (!valueInCents) throw new Error("Valor do PIX não definido no nó do fluxo.");
+                    
+                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+                    const click_id = variables.click_id; // Assume que o click_id foi salvo no início
+                    if (!click_id) throw new Error("Click ID não encontrado nas variáveis do fluxo.");
+                    
+                    const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${click_id} AND seller_id = ${sellerId}`;
+                    if (!click) throw new Error("Dados do clique não encontrados para gerar o PIX.");
+
+                    const provider = seller.pix_provider_primary || 'pushinpay';
+                    const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
+                    
+                    await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${valueInCents / 100}, ${pixResult.qr_code_text}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                    
+                    // Salva o ID da transação para uso posterior na consulta
+                    variables.last_transaction_id = pixResult.transaction_id;
+                    await sql`UPDATE user_flow_states SET variables = ${JSON.stringify(variables)} WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                    
+                    await sendMessage(chatId, `Pix copia e cola gerado:\n\n\`${pixResult.qr_code_text}\``, botToken, sellerId, botId);
+                } catch (error) {
+                    console.error("[Flow Engine] Erro ao gerar PIX:", error);
+                    await sendMessage(chatId, "Desculpe, não consegui gerar o PIX neste momento. Tente novamente mais tarde.", botToken, sellerId, botId);
+                }
+                currentNodeId = findNextNode(currentNodeId, null, edges);
+                break;
+
+            case 'action_check_pix':
+                try {
+                    const transactionId = variables.last_transaction_id;
+                    if (!transactionId) throw new Error("Nenhum ID de transação PIX encontrado para consultar.");
+                    
+                    const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+                    const [transaction] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId}`;
+                    
+                    if (!transaction) throw new Error(`Transação ${transactionId} não encontrada.`);
+
+                    if (transaction.status === 'paid') {
+                        await sendMessage(chatId, "Pagamento confirmado! ✅", botToken, sellerId, botId);
+                        currentNodeId = findNextNode(currentNodeId, 'a', edges); // Caminho 'Pago'
+                    } else {
+                        // Lógica para verificar provedores externos se o status for pendente
+                         await sendMessage(chatId, "Ainda estamos aguardando o pagamento.", botToken, sellerId, botId);
+                        currentNodeId = findNextNode(currentNodeId, 'b', edges); // Caminho 'Pendente'
+                    }
+                } catch (error) {
+                     console.error("[Flow Engine] Erro ao consultar PIX:", error);
+                     await sendMessage(chatId, "Não consegui consultar o status do PIX agora.", botToken, sellerId, botId);
+                     currentNodeId = findNextNode(currentNodeId, 'b', edges); // Segue caminho de pendente/erro
+                }
+                break;
+
             default:
-                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Continuando pelo próximo nó padrão.`);
-                currentNodeId = findNextNode(currentNodeId, null, edges); // Tenta continuar se possível
+                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Parando fluxo.`);
+                currentNodeId = null;
                 break;
         }
 
         if (!currentNodeId) {
-            console.log(`[Flow Engine] Fim do ramo do fluxo para o usuário ${chatId}. Aguardando próxima interação ou timeout.`);
+            console.log(`[Flow Engine] Fim do ramo do fluxo para o usuário ${chatId}.`);
             if (!activeTimeouts.has(chatId)) {
                  await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
             }
