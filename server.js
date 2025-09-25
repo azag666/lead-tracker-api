@@ -1594,18 +1594,17 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     }
 }
 
+// <<< CÓDIGO ATUALIZADO AQUI >>>
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
     const { botId } = req.params;
     const body = req.body;
-    res.sendStatus(200);
+    res.sendStatus(200); // Responde imediatamente para o Telegram
 
     try {
         const message = body.message;
         const chatId = message?.chat?.id;
         if (!chatId || !message.text) return;
         
-        await sql`DELETE FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
         if (!bot) {
             console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`);
@@ -1613,25 +1612,39 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         }
         
         const { seller_id: sellerId, bot_token: botToken } = bot;
-        
         const text = message.text;
         const isStartCommand = text.startsWith('/start ');
-        const clickIdValue = isStartCommand ? text : null;
 
-        const [existingUser] = await sql`SELECT 1 FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId} LIMIT 1`;
-        
+        // Primeiro, verificamos o estado atual do usuário
+        const [userState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+
+        // Salva a mensagem do usuário no banco de dados
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
-            VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${clickIdValue}, ${text}, 'user')
+            VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${isStartCommand ? text : null}, ${text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
-        
-        let initialVars = {};
+
+        // LÓGICA DE DECISÃO PRINCIPAL:
+        // 1. Se for um comando /start, INICIA o fluxo (e limpa qualquer estado antigo)
         if (isStartCommand) {
-            initialVars.click_id = clickIdValue;
+            console.log(`[Webhook] Comando /start recebido para ${chatId}. Iniciando novo fluxo.`);
+            await sql`DELETE FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            
+            const initialVars = { click_id: text };
+            await processFlow(chatId, botId, botToken, sellerId, null, initialVars);
+
+        // 2. Se o usuário estiver aguardando uma resposta, CONTINUA o fluxo
+        } else if (userState && userState.waiting_for_input) {
+            console.log(`[Webhook] Resposta recebida de ${chatId}. Continuando fluxo...`);
+            await sql`DELETE FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+            await processFlow(chatId, botId, botToken, sellerId, null, {});
+
+        // 3. Caso contrário, IGNORA a mensagem
+        } else {
+            console.log(`[Webhook] Mensagem de ${chatId} ignorada (não é /start e não está aguardando resposta).`);
         }
-        
-        await processFlow(chatId, botId, botToken, sellerId, null, initialVars);
 
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
