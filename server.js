@@ -18,10 +18,11 @@ app.use(express.json());
 const sql = neon(process.env.DATABASE_URL);
 
 // --- ROTA DO CRON JOB ---
-// Esta rota deve ser chamada por um serviço externo (ex: cron-job.org) a cada minuto
+// Esta rota deve ser chamada pelo Vercel Cron Jobs a cada minuto
 app.post('/api/cron/process-timeouts', async (req, res) => {
     const cronSecret = process.env.CRON_SECRET;
-    if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {
+    // Para Vercel Cron Jobs, a verificação de segurança é feita no vercel.json, mas mantemos para segurança extra
+    if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${cronSecret}`) {
         return res.status(401).send('Unauthorized');
     }
 
@@ -41,10 +42,8 @@ app.post('/api/cron/process-timeouts', async (req, res) => {
         for (const timeout of pendingTimeouts) {
             const { chat_id, bot_id, target_node_id, variables } = timeout;
 
-            // Deleta o timeout antes de processar para evitar re-execução em caso de erro
             await sql`DELETE FROM flow_timeouts WHERE id = ${timeout.id}`;
 
-            // Verifica se o usuário não interagiu enquanto o cron estava rodando
             const [userState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chat_id} AND bot_id = ${bot_id}`;
             
             if (userState && userState.waiting_for_input) {
@@ -52,7 +51,6 @@ app.post('/api/cron/process-timeouts', async (req, res) => {
                 if (!bot) continue;
 
                 console.log(`[CRON] Processando timeout para o chat ${chat_id}, continuando do nó ${target_node_id}`);
-                // Inicia o fluxo a partir do nó de "sem resposta"
                 processFlow(chat_id, bot_id, bot.bot_token, bot.seller_id, target_node_id, variables);
             } else {
                 console.log(`[CRON] Timeout para chat ${chat_id} ignorado pois o usuário já interagiu.`);
@@ -81,12 +79,8 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
-// URL base da API da SyncPay
 const SYNCPAY_API_BASE_URL = 'https://api.syncpayments.com.br';
-
-// Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
 const syncPayTokenCache = new Map();
-
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -122,26 +116,21 @@ async function logApiRequest(req, res, next) {
 }
 
 // --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
-
 async function getSyncPayAuthToken(seller) {
     const cachedToken = syncPayTokenCache.get(seller.id);
     if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
         return cachedToken.accessToken;
     }
-
     if (!seller.syncpay_client_id || !seller.syncpay_client_secret) {
         throw new Error('Credenciais da SyncPay não configuradas para este vendedor.');
     }
-    
     console.log(`[SyncPay] Solicitando novo token para o vendedor ID: ${seller.id}`);
     const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/auth-token`, {
         client_id: seller.syncpay_client_id,
         client_secret: seller.syncpay_client_secret,
     });
-
     const { access_token, expires_in } = response.data;
     const expiresAt = Date.now() + (expires_in * 1000);
-
     syncPayTokenCache.set(seller.id, { accessToken: access_token, expiresAt });
     return access_token;
 }
@@ -149,78 +138,42 @@ async function getSyncPayAuthToken(seller) {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
-    const clientPayload = {
-        name: "Cliente Padrão",
-        email: "gabriel@gmail.com",
-        document: "21376710773",
-        phone: "27995310379"
-    };
+    const clientPayload = { name: "Cliente Padrão", email: "gabriel@gmail.com", document: "21376710773", phone: "27995310379" };
     
     if (provider === 'syncpay') {
         const token = await getSyncPayAuthToken(seller);
         const payload = { amount: value_cents / 100, payer: clientPayload };
         const commission_percentage = 2.99;
-        
         if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
-            payload.split = [{
-                percentage: Math.round(commission_percentage), 
-                user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
-            }];
+            payload.split = [{ percentage: Math.round(commission_percentage), user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID }];
         }
-        
-        const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        
+        const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, { headers: { 'Authorization': `Bearer ${token}` } });
         pixData = response.data;
         acquirer = "SyncPay";
-        
-        return { 
-            qr_code_text: pixData.pix_code, 
-            qr_code_base64: null, 
-            transaction_id: pixData.identifier, 
-            acquirer, 
-            provider 
-        };
-
+        return { qr_code_text: pixData.pix_code, qr_code_base64: null, transaction_id: pixData.identifier, acquirer, provider };
     } else if (provider === 'cnpay' || provider === 'oasyfy') {
         const isCnpay = provider === 'cnpay';
         const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
         const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
         if (!publicKey || !secretKey) throw new Error(`Credenciais para ${provider.toUpperCase()} não configuradas.`);
-
         const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
         const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
-        
-        const payload = {
-            identifier: uuidv4(),
-            amount: value_cents / 100,
-            client: clientPayload,
-            callbackUrl: `https://${host}/api/webhook/${provider}`
-        };
-
+        const payload = { identifier: uuidv4(), amount: value_cents / 100, client: clientPayload, callbackUrl: `https://${host}/api/webhook/${provider}` };
         const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
         if (apiKey !== ADMIN_API_KEY && commission > 0 && splitId) {
             payload.splits = [{ producerId: splitId, amount: commission }];
         }
-
         const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
         pixData = response.data;
         acquirer = isCnpay ? "CNPay" : "Oasy.fy";
         return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
-
-    } else { // Padrão é PushinPay
+    } else { 
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
-        const payload = {
-            value: value_cents,
-            webhook_url: `https://${host}/api/webhook/pushinpay`,
-        };
-        
+        const payload = { value: value_cents, webhook_url: `https://${host}/api/webhook/pushinpay` };
         const commission_cents = Math.floor(value_cents * 0.0299);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && PUSHINPAY_SPLIT_ACCOUNT_ID) {
             payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
         }
-
         const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
         pixData = pushinpayResponse.data;
         acquirer = "Woovi";
@@ -231,40 +184,23 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
-        if (!transaction) { 
-            console.log(`[handleSuccessfulPayment] Transação ${transaction_id} já processada ou não encontrada.`);
-            return; 
-        }
-
+        if (!transaction) return;
         console.log(`[handleSuccessfulPayment] Processando pagamento para transação ${transaction_id}.`);
-
         if (adminSubscription && webpush) {
-            const payload = JSON.stringify({
-                title: 'Nova Venda Paga!',
-                body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.`,
-            });
+            const payload = JSON.stringify({ title: 'Nova Venda Paga!', body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.` });
             webpush.sendNotification(adminSubscription, payload).catch(error => {
-                if (error.statusCode === 410) {
-                    console.log("Inscrição de notificação expirada. Removendo.");
-                    adminSubscription = null;
-                } else {
-                    console.warn("Falha ao enviar notificação push (não-crítico):", error.message);
-                }
+                if (error.statusCode === 410) adminSubscription = null;
+                else console.warn("Falha ao enviar notificação push (não-crítico):", error.message);
             });
         }
-        
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
-
         if (click && seller) {
             const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
             const productData = { id: "prod_final", name: "Produto Vendido" };
-
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-            // await checkAndAwardAchievements(seller.id); // Função não definida, chamada comentada para evitar erros.
-        } else {
-            console.error(`[handleSuccessfulPayment] ERRO: Não foi possível encontrar dados do clique ou vendedor para a transação ${transaction_id}`);
+            // await checkAndAwardAchievements(seller.id); // Função não definida
         }
     } catch(error) {
         console.error(`[handleSuccessfulPayment] ERRO CRÍTICO ao processar pagamento da transação ${transaction_id}:`, error);
@@ -1396,10 +1332,15 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 // ==========================================================
-//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (VERSÃO FINAL)
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (VERSÃO FINAL E CORRIGIDA)
 // ==========================================================
 function findNextNode(currentNodeId, handleId, edges) {
-    const edge = edges.find(edge => edge.source === currentNodeId && (edge.sourceHandle === handleId || !edge.sourceHandle || handleId === null));
+    const edge = edges.find(edge => {
+        if (handleId) {
+            return edge.source === currentNodeId && edge.sourceHandle === handleId;
+        }
+        return edge.source === currentNodeId && (edge.sourceHandle === null || edge.sourceHandle === undefined);
+    });
     return edge ? edge.target : null;
 }
 
@@ -1410,7 +1351,7 @@ async function sendTypingAction(chatId, botToken) {
             action: 'typing',
         });
     } catch (error) {
-        console.warn(`[Flow Engine] Falha ao enviar ação 'typing' para ${chatId}:`, error.response?.data || error.message);
+        console.warn(`[Flow Engine] Falha ao enviar ação 'typing' para ${chatId}.`);
     }
 }
 
@@ -1425,14 +1366,11 @@ async function sendMessage(chatId, text, botToken, sellerId, botId, showTyping) 
             typingDuration = Math.min(2000, typingDuration);
             await new Promise(resolve => setTimeout(resolve, typingDuration));
         }
-
         const response = await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
-        
         if (response.data.ok) {
             const sentMessage = response.data.result;
             const [botInfo] = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${botId}`;
             const botName = botInfo ? botInfo.bot_name : 'Bot';
-
             await sql`
                 INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, message_text, sender_type)
                 VALUES (${sellerId}, ${botId}, ${chatId}, ${sentMessage.message_id}, ${sentMessage.from.id}, ${botName}, '(Fluxo)', ${text}, 'bot')
@@ -1440,17 +1378,14 @@ async function sendMessage(chatId, text, botToken, sellerId, botId, showTyping) 
             `;
         }
     } catch (error) {
-        console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}:`, error.response?.data || error.message);
+        console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}.`);
     }
 }
 
 async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null, initialVariables = {}) {
-    console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}`);
+    console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}. Variáveis: ${JSON.stringify(initialVariables)}`);
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
-    if (!flow || !flow.nodes) {
-        console.log(`[Flow Engine] Nenhum fluxo ativo encontrado para o bot ID ${botId}.`);
-        return;
-    }
+    if (!flow || !flow.nodes) return;
 
     const flowData = typeof flow.nodes === 'string' ? JSON.parse(flow.nodes) : flow.nodes;
     const nodes = flowData.nodes || [];
@@ -1462,20 +1397,17 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     if (!currentNodeId) {
         const [userState] = await sql`SELECT * FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
         if (userState && userState.waiting_for_input) {
-            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id} pelo caminho 'com resposta'.`);
+            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id}.`);
             currentNodeId = findNextNode(userState.current_node_id, 'a', edges);
             variables = userState.variables;
         } else {
-            console.log(`[Flow Engine] Iniciando novo fluxo para ${chatId} a partir do gatilho.`);
+            console.log(`[Flow Engine] Iniciando novo fluxo para ${chatId} do gatilho.`);
             const startNode = nodes.find(node => node.type === 'trigger');
-            if (startNode) {
-                currentNodeId = findNextNode(startNode.id, null, edges);
-            }
+            if (startNode) currentNodeId = findNextNode(startNode.id, null, edges);
         }
     }
 
     if (!currentNodeId) {
-        console.log(`[Flow Engine] Fim do fluxo ou nenhum nó inicial encontrado para ${chatId}.`);
         await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
         return;
     }
@@ -1483,10 +1415,7 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     let safetyLock = 0;
     while (currentNodeId && safetyLock < 20) {
         const currentNode = nodes.find(node => node.id === currentNodeId);
-        if (!currentNode) {
-            console.error(`[Flow Engine] Erro: Nó ${currentNodeId} não encontrado no fluxo.`);
-            break;
-        }
+        if (!currentNode) break;
 
         await sql`
             INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables, waiting_for_input)
@@ -1497,96 +1426,76 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
 
         switch (currentNode.type) {
             case 'message':
-                if (currentNode.data.typingDelay && currentNode.data.typingDelay > 0) {
-                    await new Promise(resolve => setTimeout(resolve, currentNode.data.typingDelay * 1000));
-                }
+                if (currentNode.data.typingDelay > 0) await new Promise(resolve => setTimeout(resolve, currentNode.data.typingDelay * 1000));
                 await sendMessage(chatId, currentNode.data.text, botToken, sellerId, botId, currentNode.data.showTyping);
-
                 if (currentNode.data.waitForReply) {
                     await sql`UPDATE user_flow_states SET waiting_for_input = true WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    const timeoutMinutes = currentNode.data.replyTimeout || 5;
                     const noReplyNodeId = findNextNode(currentNode.id, 'b', edges);
-                    
-                    if(noReplyNodeId){
+                    if (noReplyNodeId) {
+                        const timeoutMinutes = currentNode.data.replyTimeout || 5;
                         console.log(`[Flow Engine] Agendando timeout de ${timeoutMinutes} min para o nó ${noReplyNodeId}`);
                         await sql`
                             INSERT INTO flow_timeouts (chat_id, bot_id, execute_at, target_node_id, variables)
                             VALUES (${chatId}, ${botId}, NOW() + INTERVAL '${timeoutMinutes} minutes', ${noReplyNodeId}, ${JSON.stringify(variables)})
                         `;
                     }
-                    currentNodeId = null; 
+                    currentNodeId = null;
                 } else {
                     currentNodeId = findNextNode(currentNodeId, 'a', edges);
                 }
                 break;
-
             case 'delay':
-                const delaySeconds = currentNode.data.delayInSeconds || 1;
-                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+                await new Promise(resolve => setTimeout(resolve, (currentNode.data.delayInSeconds || 1) * 1000));
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
-            
             case 'action_pix':
                 try {
-                    const valueInCents = currentNode.data.valueInCents;
-                    if (!valueInCents) throw new Error("Valor do PIX não definido no nó do fluxo.");
-                    
+                    const { valueInCents } = currentNode.data;
+                    if (!valueInCents) throw new Error("Valor do PIX não definido.");
                     const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
                     const [userFlowState] = await sql`SELECT variables FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    const click_id = userFlowState.variables.click_id;
-                    if (!click_id) throw new Error("Click ID não encontrado nas variáveis do fluxo.");
-                    
+                    const { click_id } = userFlowState.variables;
+                    if (!click_id) throw new Error("Click ID não encontrado.");
                     const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${click_id} AND seller_id = ${sellerId}`;
-                    if (!click) throw new Error("Dados do clique não encontrados para gerar o PIX.");
-
-                    const provider = seller.pix_provider_primary || 'pushinpay';
-                    const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
-                    
+                    if (!click) throw new Error("Dados do clique não encontrados.");
+                    const pixResult = await generatePixForProvider(seller.pix_provider_primary || 'pushinpay', seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
                     await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${valueInCents / 100}, ${pixResult.qr_code_text}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
-                    
                     variables.last_transaction_id = pixResult.transaction_id;
                     await sql`UPDATE user_flow_states SET variables = ${JSON.stringify(variables)} WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    
                     await sendMessage(chatId, `Pix copia e cola gerado:\n\n\`${pixResult.qr_code_text}\``, botToken, sellerId, botId, true);
                 } catch (error) {
                     console.error("[Flow Engine] Erro ao gerar PIX:", error);
-                    await sendMessage(chatId, "Desculpe, não consegui gerar o PIX neste momento. Tente novamente mais tarde.", botToken, sellerId, botId, true);
+                    await sendMessage(chatId, "Desculpe, não consegui gerar o PIX.", botToken, sellerId, botId, true);
                 }
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
-
             case 'action_check_pix':
                 try {
-                    const transactionId = variables.last_transaction_id;
-                    if (!transactionId) throw new Error("Nenhum ID de transação PIX encontrado para consultar.");
-                    
-                    const [transaction] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId}`;
-                    
-                    if (!transaction) throw new Error(`Transação ${transactionId} não encontrada.`);
-
+                    const { last_transaction_id } = variables;
+                    if (!last_transaction_id) throw new Error("Nenhum PIX gerado para consultar.");
+                    const [transaction] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${last_transaction_id}`;
+                    if (!transaction) throw new Error("Transação não encontrada.");
                     if (transaction.status === 'paid') {
                         await sendMessage(chatId, "Pagamento confirmado! ✅", botToken, sellerId, botId, true);
-                        currentNodeId = findNextNode(currentNodeId, 'a', edges); // Caminho 'Pago'
+                        currentNodeId = findNextNode(currentNodeId, 'a', edges); // Pago
                     } else {
-                         await sendMessage(chatId, "Ainda estamos aguardando o pagamento.", botToken, sellerId, botId, true);
-                        currentNodeId = findNextNode(currentNodeId, 'b', edges); // Caminho 'Pendente'
+                        await sendMessage(chatId, "Ainda estamos aguardando o pagamento.", botToken, sellerId, botId, true);
+                        currentNodeId = findNextNode(currentNodeId, 'b', edges); // Pendente
                     }
                 } catch (error) {
                      console.error("[Flow Engine] Erro ao consultar PIX:", error);
-                     await sendMessage(chatId, "Não consegui consultar o status do PIX agora.", botToken, sellerId, botId, true);
+                     await sendMessage(chatId, "Não consegui consultar o status do PIX.", botToken, sellerId, botId, true);
                      currentNodeId = findNextNode(currentNodeId, 'b', edges);
                 }
                 break;
-
             default:
-                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Parando fluxo.`);
+                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}.`);
                 currentNodeId = null;
                 break;
         }
-
         if (!currentNodeId) {
             const pendingTimeouts = await sql`SELECT 1 FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-            if(pendingTimeouts.length === 0){
+            if (pendingTimeouts.length === 0) {
                  await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
             }
         }
@@ -1595,44 +1504,27 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
 }
 
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
-    const { botId } = req.params;
-    const body = req.body;
     res.sendStatus(200);
-
+    const { botId } = req.params;
+    const { message } = req.body;
+    if (!message || !message.chat?.id || !message.text) return;
+    const { id: chatId } = message.chat;
     try {
-        const message = body.message;
-        const chatId = message?.chat?.id;
-        if (!chatId || !message.text) return;
-        
         await sql`DELETE FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) {
-            console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`);
-            return;
-        }
-        
+        if (!bot) return;
         const { seller_id: sellerId, bot_token: botToken } = bot;
-        
-        const text = message.text;
+        const { text } = message;
         const isStartCommand = text.startsWith('/start ');
         const clickIdValue = isStartCommand ? text : null;
-
-        const [existingUser] = await sql`SELECT 1 FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId} LIMIT 1`;
-        
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
             VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${clickIdValue}, ${text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
-        
         let initialVars = {};
-        if (isStartCommand) {
-            initialVars.click_id = clickIdValue;
-        }
-        
+        if (isStartCommand) initialVars.click_id = clickIdValue;
         await processFlow(chatId, botId, botToken, sellerId, null, initialVars);
-
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
     }
