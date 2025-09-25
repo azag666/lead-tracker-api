@@ -1392,22 +1392,24 @@ async function processFlow(chatId, botId, botToken, sellerId, messageText = null
     let currentNodeId = null;
     let variables = userState ? userState.variables : {};
 
-    if (userState && userState.waiting_for_input) {
-        console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id}.`);
-        variables['user_reply'] = messageText;
-        await sql`UPDATE user_flow_states SET waiting_for_input = false, variables = ${JSON.stringify(variables)} WHERE id = ${userState.id}`;
-        currentNodeId = findNextNode(userState.current_node_id, 'a', edges);
-    } else if (isNewUserWithClickId) {
-        console.log(`[Flow Engine] Novo usuário ${chatId} com Click ID. Iniciando fluxo.`);
+   if (userState && userState.waiting_for_input) {
+    // O usuário está respondendo a uma pergunta, continuamos o fluxo
+    console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id}.`);
+    variables['user_reply'] = messageText;
+    await sql`UPDATE user_flow_states SET waiting_for_input = false, variables = ${JSON.stringify(variables)} WHERE id = ${userState.id}`;
+    currentNodeId = findNextNode(userState.current_node_id, 'a', edges);
+
+} else {
+    // É um novo usuário OU um usuário existente iniciando/reiniciando a conversa
+    console.log(`[Flow Engine] Iniciando/Reiniciando fluxo para o usuário ${chatId}.`);
+    if (isNewUserWithClickId) {
         variables.click_id = clickIdValue;
-        const startNode = nodes.find(node => node.type === 'trigger');
-        if (startNode) {
-            currentNodeId = findNextNode(startNode.id, null, edges);
-        }
-    } else {
-        console.log(`[Flow Engine] Mensagem de ${chatId} recebida, mas não aguardando resposta. Ignorando.`);
-        return;
     }
+    const startNode = nodes.find(node => node.type === 'trigger');
+    if (startNode) {
+        currentNodeId = findNextNode(startNode.id, null, edges);
+    }
+}
 
     if (!currentNodeId) {
         console.log(`[Flow Engine] Fim do fluxo ou nenhum nó inicial encontrado para ${chatId}.`);
