@@ -18,11 +18,12 @@ app.use(express.json());
 const sql = neon(process.env.DATABASE_URL);
 
 // --- ROTA DO CRON JOB ---
-// Esta rota deve ser chamada por um serviço externo (ex: cron-job.org) a cada minuto
 app.post('/api/cron/process-timeouts', async (req, res) => {
-    const cronSecret = process.env.CRON_SECRET;
-    if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {
-        return res.status(401).send('Unauthorized');
+    // A verificação de segurança foi removida para teste.
+    // Lembre-se de adicionar um método de segurança compatível com a Vercel se necessário.
+    
+    try {
+//...
     }
 
     try {
