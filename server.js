@@ -1842,7 +1842,6 @@ async function checkPendingTransactions() {
 // ==========================================================
 //          ROTAS PARA O CRIADOR DE FLUXOS E CHAT
 // ==========================================================
-
 const createInitialFlowStructure = () => ({
     nodes: [{ id: 'start', type: 'trigger', position: { x: 250, y: 50 }, data: {} }],
     edges: []
@@ -1930,8 +1929,6 @@ app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar o fluxo.' });
     }
 });
-
-// ========= ROTA DO CHAT CORRIGIDA =========
 app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const sellerId = req.user.id;
@@ -1942,23 +1939,24 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
 
-        // CORREÇÃO: A query agora busca o último registro de cada chat_id sem filtrar pelo sender_type
-        // e ordena pela data da última mensagem para exibir os mais recentes primeiro.
         const users = await sql`
             SELECT DISTINCT ON (chat_id) 
                    chat_id, first_name, last_name, username, click_id,
-                   (SELECT MAX(created_at) FROM telegram_chats tc2 WHERE tc2.chat_id = tc1.chat_id) as last_message_at
-            FROM telegram_chats tc1
+                   created_at as last_message_at
+            FROM telegram_chats
             WHERE bot_id = ${botId} AND seller_id = ${sellerId}
-            ORDER BY last_message_at DESC;
+            ORDER BY chat_id, created_at DESC;
         `;
-        res.status(200).json(users);
+        
+        // Ordena os resultados no javascript pela data da última mensagem para garantir a ordem correta na UI
+        const sortedUsers = users.sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
+
+        res.status(200).json(sortedUsers);
     } catch (error) {
         console.error("Erro ao buscar usuários do chat:", error);
         res.status(500).json({ message: 'Erro ao buscar usuários do chat.' });
     }
 });
-
 app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const chatId = parseInt(req.params.chatId, 10);
