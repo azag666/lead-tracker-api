@@ -17,11 +17,11 @@ app.use(express.json());
 // --- OTIMIZAÇÃO CRÍTICA: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
 const sql = neon(process.env.DATABASE_URL);
 
-// --- ROTA DO CRON JOB (CORRIGIDO PARA GET) ---
-app.get('/api/cron/process-timeouts', async (req, res) => {
+// --- ROTA DO CRON JOB ---
+// Esta rota deve ser chamada por um serviço externo (ex: cron-job.org) a cada minuto
+app.post('/api/cron/process-timeouts', async (req, res) => {
     const cronSecret = process.env.CRON_SECRET;
-    // Para Vercel Cron Jobs, a verificação de segurança é feita no vercel.json, mas mantemos para segurança extra
-    if (process.env.CRON_SECRET && req.headers['authorization'] !== `Bearer ${cronSecret}`) {
+    if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {
         return res.status(401).send('Unauthorized');
     }
 
@@ -41,8 +41,10 @@ app.get('/api/cron/process-timeouts', async (req, res) => {
         for (const timeout of pendingTimeouts) {
             const { chat_id, bot_id, target_node_id, variables } = timeout;
 
+            // Deleta o timeout antes de processar para evitar re-execução em caso de erro
             await sql`DELETE FROM flow_timeouts WHERE id = ${timeout.id}`;
 
+            // Verifica se o usuário não interagiu enquanto o cron estava rodando
             const [userState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chat_id} AND bot_id = ${bot_id}`;
             
             if (userState && userState.waiting_for_input) {
@@ -50,6 +52,7 @@ app.get('/api/cron/process-timeouts', async (req, res) => {
                 if (!bot) continue;
 
                 console.log(`[CRON] Processando timeout para o chat ${chat_id}, continuando do nó ${target_node_id}`);
+                // Inicia o fluxo a partir do nó de "sem resposta"
                 processFlow(chat_id, bot_id, bot.bot_token, bot.seller_id, target_node_id, variables);
             } else {
                 console.log(`[CRON] Timeout para chat ${chat_id} ignorado pois o usuário já interagiu.`);
@@ -78,8 +81,12 @@ const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
 
+// URL base da API da SyncPay
 const SYNCPAY_API_BASE_URL = 'https://api.syncpayments.com.br';
+
+// Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
 const syncPayTokenCache = new Map();
+
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -115,21 +122,26 @@ async function logApiRequest(req, res, next) {
 }
 
 // --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
+
 async function getSyncPayAuthToken(seller) {
     const cachedToken = syncPayTokenCache.get(seller.id);
     if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
         return cachedToken.accessToken;
     }
+
     if (!seller.syncpay_client_id || !seller.syncpay_client_secret) {
         throw new Error('Credenciais da SyncPay não configuradas para este vendedor.');
     }
+    
     console.log(`[SyncPay] Solicitando novo token para o vendedor ID: ${seller.id}`);
     const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/auth-token`, {
         client_id: seller.syncpay_client_id,
         client_secret: seller.syncpay_client_secret,
     });
+
     const { access_token, expires_in } = response.data;
     const expiresAt = Date.now() + (expires_in * 1000);
+
     syncPayTokenCache.set(seller.id, { accessToken: access_token, expiresAt });
     return access_token;
 }
@@ -137,42 +149,78 @@ async function getSyncPayAuthToken(seller) {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
-    const clientPayload = { name: "Cliente Padrão", email: "gabriel@gmail.com", document: "21376710773", phone: "27995310379" };
+    const clientPayload = {
+        name: "Cliente Padrão",
+        email: "gabriel@gmail.com",
+        document: "21376710773",
+        phone: "27995310379"
+    };
     
     if (provider === 'syncpay') {
         const token = await getSyncPayAuthToken(seller);
         const payload = { amount: value_cents / 100, payer: clientPayload };
         const commission_percentage = 2.99;
+        
         if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
-            payload.split = [{ percentage: Math.round(commission_percentage), user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID }];
+            payload.split = [{
+                percentage: Math.round(commission_percentage), 
+                user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
+            }];
         }
-        const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, { headers: { 'Authorization': `Bearer ${token}` } });
+        
+        const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
         pixData = response.data;
         acquirer = "SyncPay";
-        return { qr_code_text: pixData.pix_code, qr_code_base64: null, transaction_id: pixData.identifier, acquirer, provider };
+        
+        return { 
+            qr_code_text: pixData.pix_code, 
+            qr_code_base64: null, 
+            transaction_id: pixData.identifier, 
+            acquirer, 
+            provider 
+        };
+
     } else if (provider === 'cnpay' || provider === 'oasyfy') {
         const isCnpay = provider === 'cnpay';
         const publicKey = isCnpay ? seller.cnpay_public_key : seller.oasyfy_public_key;
         const secretKey = isCnpay ? seller.cnpay_secret_key : seller.oasyfy_secret_key;
         if (!publicKey || !secretKey) throw new Error(`Credenciais para ${provider.toUpperCase()} não configuradas.`);
+
         const apiUrl = isCnpay ? 'https://painel.appcnpay.com/api/v1/gateway/pix/receive' : 'https://app.oasyfy.com/api/v1/gateway/pix/receive';
         const splitId = isCnpay ? CNPAY_SPLIT_PRODUCER_ID : OASYFY_SPLIT_PRODUCER_ID;
-        const payload = { identifier: uuidv4(), amount: value_cents / 100, client: clientPayload, callbackUrl: `https://${host}/api/webhook/${provider}` };
+        
+        const payload = {
+            identifier: uuidv4(),
+            amount: value_cents / 100,
+            client: clientPayload,
+            callbackUrl: `https://${host}/api/webhook/${provider}`
+        };
+
         const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
         if (apiKey !== ADMIN_API_KEY && commission > 0 && splitId) {
             payload.splits = [{ producerId: splitId, amount: commission }];
         }
+
         const response = await axios.post(apiUrl, payload, { headers: { 'x-public-key': publicKey, 'x-secret-key': secretKey } });
         pixData = response.data;
         acquirer = isCnpay ? "CNPay" : "Oasy.fy";
         return { qr_code_text: pixData.pix.code, qr_code_base64: pixData.pix.base64, transaction_id: pixData.transactionId, acquirer, provider };
-    } else { 
+
+    } else { // Padrão é PushinPay
         if (!seller.pushinpay_token) throw new Error(`Token da PushinPay não configurado.`);
-        const payload = { value: value_cents, webhook_url: `https://${host}/api/webhook/pushinpay` };
+        const payload = {
+            value: value_cents,
+            webhook_url: `https://${host}/api/webhook/pushinpay`,
+        };
+        
         const commission_cents = Math.floor(value_cents * 0.0299);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && PUSHINPAY_SPLIT_ACCOUNT_ID) {
             payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
         }
+
         const pushinpayResponse = await axios.post('https://api.pushinpay.com.br/api/pix/cashIn', payload, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
         pixData = pushinpayResponse.data;
         acquirer = "Woovi";
@@ -183,28 +231,46 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
-        if (!transaction) return;
+        if (!transaction) { 
+            console.log(`[handleSuccessfulPayment] Transação ${transaction_id} já processada ou não encontrada.`);
+            return; 
+        }
+
         console.log(`[handleSuccessfulPayment] Processando pagamento para transação ${transaction_id}.`);
+
         if (adminSubscription && webpush) {
-            const payload = JSON.stringify({ title: 'Nova Venda Paga!', body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.` });
+            const payload = JSON.stringify({
+                title: 'Nova Venda Paga!',
+                body: `Venda de R$ ${parseFloat(transaction.pix_value).toFixed(2)} foi confirmada.`,
+            });
             webpush.sendNotification(adminSubscription, payload).catch(error => {
-                if (error.statusCode === 410) adminSubscription = null;
-                else console.warn("Falha ao enviar notificação push (não-crítico):", error.message);
+                if (error.statusCode === 410) {
+                    console.log("Inscrição de notificação expirada. Removendo.");
+                    adminSubscription = null;
+                } else {
+                    console.warn("Falha ao enviar notificação push (não-crítico):", error.message);
+                }
             });
         }
+        
         const [click] = await sql`SELECT * FROM clicks WHERE id = ${transaction.click_id_internal}`;
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${click.seller_id}`;
+
         if (click && seller) {
             const finalCustomerData = customerData || { name: "Cliente Pagante", document: null };
             const productData = { id: "prod_final", name: "Produto Vendido" };
+
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-            // await checkAndAwardAchievements(seller.id); // Função não definida
+            // await checkAndAwardAchievements(seller.id); // Função não definida, chamada comentada para evitar erros.
+        } else {
+            console.error(`[handleSuccessfulPayment] ERRO: Não foi possível encontrar dados do clique ou vendedor para a transação ${transaction_id}`);
         }
     } catch(error) {
         console.error(`[handleSuccessfulPayment] ERRO CRÍTICO ao processar pagamento da transação ${transaction_id}:`, error);
     }
 }
+
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
 function authenticateAdmin(req, res, next) {
@@ -469,12 +535,15 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     }
 });
 
+
 // --- ROTAS GERAIS DE USUÁRIO ---
 app.post('/api/sellers/register', async (req, res) => {
     const { name, email, password } = req.body;
+
     if (!name || !email || !password || password.length < 8) {
         return res.status(400).json({ message: 'Dados inválidos. Nome, email e senha (mínimo 8 caracteres) são obrigatórios.' });
     }
+    
     try {
         const normalizedEmail = email.trim().toLowerCase();
         const existingSeller = await sql`SELECT id FROM sellers WHERE LOWER(email) = ${normalizedEmail}`;
@@ -483,7 +552,9 @@ app.post('/api/sellers/register', async (req, res) => {
         }
         const hashedPassword = await bcrypt.hash(password, 10);
         const apiKey = uuidv4();
+        
         await sql`INSERT INTO sellers (name, email, password_hash, api_key, is_active) VALUES (${name}, ${normalizedEmail}, ${hashedPassword}, ${apiKey}, TRUE)`;
+        
         res.status(201).json({ message: 'Vendedor cadastrado com sucesso!' });
     } catch (error) {
         console.error("Erro no registro:", error);
@@ -501,16 +572,22 @@ app.post('/api/sellers/login', async (req, res) => {
              console.warn(`[LOGIN FAILURE] Usuário não encontrado no banco de dados para o email: "${normalizedEmail}"`);
             return res.status(404).json({ message: 'Usuário não encontrado.' });
         }
+        
         const seller = sellerResult[0];
+        
         if (!seller.is_active) {
             return res.status(403).json({ message: 'Este usuário está bloqueado.' });
         }
+        
         const isPasswordCorrect = await bcrypt.compare(password, seller.password_hash);
         if (!isPasswordCorrect) return res.status(401).json({ message: 'Senha incorreta.' });
+        
         const tokenPayload = { id: seller.id, email: seller.email };
         const token = jwt.sign(tokenPayload, process.env.JWT_SECRET, { expiresIn: '1d' });
+        
         const { password_hash, ...sellerData } = seller;
         res.status(200).json({ message: 'Login bem-sucedido!', token, seller: sellerData });
+
     } catch (error) {
         console.error("ERRO DETALHADO NO LOGIN:", error); 
         res.status(500).json({ message: 'Erro interno do servidor.' });
@@ -547,10 +624,10 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados.' });
     }
 });
-
 app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
+        
         const userAchievements = await sql`
             SELECT a.title, a.description, ua.is_completed, a.sales_goal
             FROM achievements a
@@ -558,6 +635,7 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
             WHERE ua.seller_id = ${sellerId}
             ORDER BY a.sales_goal ASC;
         `;
+
         const topSellersRanking = await sql`
             SELECT s.name, COALESCE(SUM(pt.pix_value), 0) AS total_revenue
             FROM sellers s
@@ -567,6 +645,7 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
             ORDER BY total_revenue DESC
             LIMIT 5;
         `;
+        
         const [userRevenue] = await sql`
             SELECT COALESCE(SUM(pt.pix_value), 0) AS total_revenue
             FROM sellers s
@@ -575,6 +654,7 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
             WHERE s.id = ${sellerId}
             GROUP BY s.id;
         `;
+
         const userRankResult = await sql`
             SELECT COUNT(T1.id) + 1 AS rank
             FROM (
@@ -586,14 +666,19 @@ app.get('/api/dashboard/achievements-and-ranking', authenticateJwt, async (req, 
                 HAVING COALESCE(SUM(pt.pix_value), 0) > ${userRevenue.total_revenue}
             ) AS T1;
         `;
+        
         const userRank = userRankResult[0].rank;
-        res.json({ userAchievements, topSellersRanking, currentUserRank: userRank });
+
+        res.json({
+            userAchievements,
+            topSellersRanking,
+            currentUserRank: userRank
+        });
     } catch (error) {
         console.error("Erro ao buscar conquistas e ranking:", error);
         res.status(500).json({ message: 'Erro ao buscar dados de ranking.' });
     }
 });
-
 app.post('/api/pixels', authenticateJwt, async (req, res) => {
     const { account_name, pixel_id, meta_api_token } = req.body;
     if (!account_name || !pixel_id || !meta_api_token) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
@@ -615,6 +700,9 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o pixel.' });
     }
 });
+
+// --- ROTAS DE GERENCIAMENTO DE BOTS (COM ADIÇÕES) ---
+
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const { bot_name } = req.body;
     if (!bot_name) {
@@ -635,6 +723,7 @@ app.post('/api/bots', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar o bot.' });
     }
 });
+
 app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
     try {
         await sql`DELETE FROM telegram_bots WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
@@ -644,13 +733,14 @@ app.delete('/api/bots/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o bot.' });
     }
 });
+
 app.put('/api/bots/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     let { bot_token } = req.body;
     if (!bot_token) {
         return res.status(400).json({ message: 'O token do bot é obrigatório.' });
     }
-    bot_token = bot_token.trim();
+    bot_token = bot_token.trim(); // Limpa espaços extras
     try {
         await sql`
             UPDATE telegram_bots 
@@ -662,6 +752,7 @@ app.put('/api/bots/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao atualizar o token do bot.' });
     }
 });
+
 app.post('/api/bots/:id/set-webhook', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const sellerId = req.user.id;
@@ -669,13 +760,17 @@ app.post('/api/bots/:id/set-webhook', authenticateJwt, async (req, res) => {
         const [bot] = await sql`
             SELECT bot_token FROM telegram_bots 
             WHERE id = ${id} AND seller_id = ${sellerId}`;
+
         if (!bot || !bot.bot_token || bot.bot_token.trim() === '') {
             return res.status(400).json({ message: 'O token do bot não está configurado. Salve um token válido primeiro.' });
         }
+
         const token = bot.bot_token.trim();
         const webhookUrl = `https://novaapi-one.vercel.app/api/webhook/telegram/${id}`;
         const telegramApiUrl = `https://api.telegram.org/bot${token}/setWebhook?url=${webhookUrl}`;
+        
         const response = await axios.get(telegramApiUrl);
+
         if (response.data.ok) {
             res.status(200).json({ message: 'Webhook configurado com sucesso!' });
         } else {
@@ -694,9 +789,11 @@ app.post('/api/bots/:id/set-webhook', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: `Erro interno no servidor: ${error.message}` });
     }
 });
+
 app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
     const { bot_id } = req.body;
     if (!bot_id) return res.status(400).json({ message: 'ID do bot é obrigatório.' });
+
     try {
         const [bot] = await sql`SELECT bot_token, bot_name FROM telegram_bots WHERE id = ${bot_id} AND seller_id = ${req.user.id}`;
         if (!bot) {
@@ -705,7 +802,9 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         if (!bot.bot_token) {
             return res.status(400).json({ message: 'Token do bot não configurado. Impossível testar.'})
         }
+
         const response = await axios.get(`https://api.telegram.org/bot${bot.bot_token}/getMe`);
+        
         if (response.data.ok) {
             res.status(200).json({ 
                 message: `Conexão com o bot @${response.data.result.username} bem-sucedida!`,
@@ -714,6 +813,7 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         } else {
             throw new Error('A API do Telegram retornou um erro.');
         }
+
     } catch (error) {
         console.error(`[BOT TEST ERROR] Bot ID: ${bot_id} - Erro:`, error.response?.data || error.message);
         let errorMessage = 'Falha ao conectar com o bot. Verifique o token e tente novamente.';
@@ -725,12 +825,15 @@ app.post('/api/bots/test-connection', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: errorMessage });
     }
 });
+
 app.get('/api/bots/users', authenticateJwt, async (req, res) => {
     const { botIds } = req.query; 
+
     if (!botIds) {
         return res.status(400).json({ message: 'IDs dos bots são obrigatórios.' });
     }
     const botIdArray = botIds.split(',').map(id => parseInt(id.trim(), 10));
+
     try {
         const users = await sql`
             SELECT DISTINCT ON (chat_id) chat_id, first_name, last_name, username 
@@ -743,19 +846,560 @@ app.get('/api/bots/users', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao buscar usuários.' });
     }
 });
+app.post('/api/pressels', authenticateJwt, async (req, res) => {
+    const { name, bot_id, white_page_url, pixel_ids, utmify_integration_id } = req.body;
+    if (!name || !bot_id || !white_page_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) return res.status(400).json({ message: 'Todos os campos são obrigatórios.' });
+    
+    try {
+        const numeric_bot_id = parseInt(bot_id, 10);
+        const numeric_pixel_ids = pixel_ids.map(id => parseInt(id, 10));
 
-// ... (Restante das rotas que você já tem, como pressels, checkouts, etc.)
+        const botResult = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${numeric_bot_id} AND seller_id = ${req.user.id}`;
+        if (botResult.length === 0) {
+            return res.status(404).json({ message: 'Bot não encontrado.' });
+        }
+        const bot_name = botResult[0].bot_name;
+
+        await sql`BEGIN`;
+        try {
+            const [newPressel] = await sql`
+                INSERT INTO pressels (seller_id, name, bot_id, bot_name, white_page_url, utmify_integration_id) 
+                VALUES (${req.user.id}, ${name}, ${numeric_bot_id}, ${bot_name}, ${white_page_url}, ${utmify_integration_id || null}) 
+                RETURNING *;
+            `;
+            
+            for (const pixelId of numeric_pixel_ids) {
+                await sql`INSERT INTO pressel_pixels (pressel_id, pixel_config_id) VALUES (${newPressel.id}, ${pixelId})`;
+            }
+            await sql`COMMIT`;
+            
+            res.status(201).json({ ...newPressel, pixel_ids: numeric_pixel_ids, bot_name });
+        } catch (transactionError) {
+            await sql`ROLLBACK`;
+            throw transactionError;
+        }
+    } catch (error) {
+        console.error("Erro ao salvar pressel:", error);
+        res.status(500).json({ message: 'Erro ao salvar a pressel.' });
+    }
+});
+app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
+    try {
+        await sql`DELETE FROM pressels WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao excluir pressel:", error);
+        res.status(500).json({ message: 'Erro ao excluir a pressel.' });
+    }
+});
+app.post('/api/checkouts', authenticateJwt, async (req, res) => {
+    const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
+
+    if (!name || !product_name || !redirect_url || !Array.isArray(pixel_ids) || pixel_ids.length === 0) {
+        return res.status(400).json({ message: 'Nome, Nome do Produto, URL de Redirecionamento e ao menos um Pixel são obrigatórios.' });
+    }
+    if (value_type === 'fixed' && (!fixed_value_cents || fixed_value_cents <= 0)) {
+        return res.status(400).json({ message: 'Para valor fixo, o valor em centavos deve ser maior que zero.' });
+    }
+
+    try {
+        await sql`BEGIN`;
+
+        const [newCheckout] = await sql`
+            INSERT INTO checkouts (seller_id, name, product_name, redirect_url, value_type, fixed_value_cents)
+            VALUES (${req.user.id}, ${name}, ${product_name}, ${redirect_url}, ${value_type}, ${value_type === 'fixed' ? fixed_value_cents : null})
+            RETURNING *;
+        `;
+
+        for (const pixelId of pixel_ids) {
+            await sql`INSERT INTO checkout_pixels (checkout_id, pixel_config_id) VALUES (${newCheckout.id}, ${pixelId})`;
+        }
+        
+        await sql`COMMIT`;
+
+        res.status(201).json({ ...newCheckout, pixel_ids: pixel_ids.map(id => parseInt(id)) });
+    } catch (error) {
+        await sql`ROLLBACK`;
+        console.error("Erro ao salvar checkout:", error);
+        res.status(500).json({ message: 'Erro interno ao salvar o checkout.' });
+    }
+});
+app.delete('/api/checkouts/:id', authenticateJwt, async (req, res) => {
+    try {
+        await sql`DELETE FROM checkouts WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao excluir checkout:", error);
+        res.status(500).json({ message: 'Erro ao excluir o checkout.' });
+    }
+});
+app.post('/api/settings/pix', authenticateJwt, async (req, res) => {
+    const { 
+        pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key,
+        syncpay_client_id, syncpay_client_secret,
+        pix_provider_primary, pix_provider_secondary, pix_provider_tertiary
+    } = req.body;
+    try {
+        await sql`UPDATE sellers SET 
+            pushinpay_token = ${pushinpay_token || null}, 
+            cnpay_public_key = ${cnpay_public_key || null}, 
+            cnpay_secret_key = ${cnpay_secret_key || null}, 
+            oasyfy_public_key = ${oasyfy_public_key || null}, 
+            oasyfy_secret_key = ${oasyfy_secret_key || null},
+            syncpay_client_id = ${syncpay_client_id || null},
+            syncpay_client_secret = ${syncpay_client_secret || null},
+            pix_provider_primary = ${pix_provider_primary || 'pushinpay'},
+            pix_provider_secondary = ${pix_provider_secondary || null},
+            pix_provider_tertiary = ${pix_provider_tertiary || null}
+            WHERE id = ${req.user.id}`;
+        res.status(200).json({ message: 'Configurações de PIX salvas com sucesso.' });
+    } catch (error) {
+        console.error("Erro ao salvar configurações de PIX:", error);
+        res.status(500).json({ message: 'Erro ao salvar as configurações.' });
+    }
+});
+app.get('/api/integrations/utmify', authenticateJwt, async (req, res) => {
+    try {
+        const integrations = await sql`
+            SELECT id, account_name, created_at 
+            FROM utmify_integrations 
+            WHERE seller_id = ${req.user.id} 
+            ORDER BY created_at DESC
+        `;
+        res.status(200).json(integrations);
+    } catch (error) {
+        console.error("Erro ao buscar integrações Utmify:", error);
+        res.status(500).json({ message: 'Erro ao buscar integrações.' });
+    }
+});
+app.post('/api/integrations/utmify', authenticateJwt, async (req, res) => {
+    const { account_name, api_token } = req.body;
+    if (!account_name || !api_token) {
+        return res.status(400).json({ message: 'Nome da conta e token da API são obrigatórios.' });
+    }
+    try {
+        const [newIntegration] = await sql`
+            INSERT INTO utmify_integrations (seller_id, account_name, api_token) 
+            VALUES (${req.user.id}, ${account_name}, ${api_token}) 
+            RETURNING id, account_name, created_at
+        `;
+        res.status(201).json(newIntegration);
+    } catch (error) {
+        console.error("Erro ao adicionar integração Utmify:", error);
+        res.status(500).json({ message: 'Erro ao salvar integração.' });
+    }
+});
+app.delete('/api/integrations/utmify/:id', authenticateJwt, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await sql`
+            DELETE FROM utmify_integrations 
+            WHERE id = ${id} AND seller_id = ${req.user.id}
+        `;
+        res.status(204).send();
+    } catch (error) {
+        console.error("Erro ao excluir integração Utmify:", error);
+        res.status(500).json({ message: 'Erro ao excluir integração.' });
+    }
+});
+app.post('/api/registerClick', logApiRequest, async (req, res) => {
+    const { sellerApiKey, presselId, checkoutId, referer, fbclid, fbp, fbc, user_agent, utm_source, utm_campaign, utm_medium, utm_content, utm_term } = req.body;
+
+    if (!sellerApiKey || (!presselId && !checkoutId)) {
+        return res.status(400).json({ message: 'Dados insuficientes.' });
+    }
+
+    const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
+
+    try {
+        const result = await sql`INSERT INTO clicks (
+            seller_id, pressel_id, checkout_id, ip_address, user_agent, referer, fbclid, fbp, fbc,
+            utm_source, utm_campaign, utm_medium, utm_content, utm_term
+        ) 
+        SELECT
+            s.id, ${presselId || null}, ${checkoutId || null}, ${ip_address}, ${user_agent}, ${referer}, ${fbclid}, ${fbp}, ${fbc},
+            ${utm_source || null}, ${utm_campaign || null}, ${utm_medium || null}, ${utm_content || null}, ${utm_term || null}
+        FROM sellers s WHERE s.api_key = ${sellerApiKey} RETURNING *;`;
+
+        if (result.length === 0) {
+            return res.status(404).json({ message: 'API Key inválida.' });
+        }
+
+        const newClick = result[0];
+        const click_record_id = newClick.id;
+        const clean_click_id = `lead${click_record_id.toString().padStart(6, '0')}`;
+        const db_click_id = `/start ${clean_click_id}`;
+        
+        await sql`UPDATE clicks SET click_id = ${db_click_id} WHERE id = ${click_record_id}`;
+
+        res.status(200).json({ status: 'success', click_id: clean_click_id });
+
+        (async () => {
+            try {
+                let city = 'Desconhecida', state = 'Desconhecido';
+                if (ip_address && ip_address !== '::1' && !ip_address.startsWith('192.168.')) {
+                    const geo = await axios.get(`http://ip-api.com/json/${ip_address}?fields=city,regionName`);
+                    city = geo.data.city || city;
+                    state = geo.data.regionName || state;
+                }
+                await sql`UPDATE clicks SET city = ${city}, state = ${state} WHERE id = ${click_record_id}`;
+                console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
+
+                if (checkoutId) {
+                    const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
+                    const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
+                    await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
+                    console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
+                }
+            } catch (backgroundError) {
+                console.error("Erro em tarefa de segundo plano (registerClick):", backgroundError.message);
+            }
+        })();
+
+    } catch (error) {
+        console.error("Erro ao registrar clique:", error);
+        if (!res.headersSent) {
+            res.status(500).json({ message: 'Erro interno do servidor.' });
+        }
+    }
+});
+app.post('/api/click/info', logApiRequest, async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const { click_id } = req.body;
+    if (!apiKey || !click_id) return res.status(400).json({ message: 'API Key e click_id são obrigatórios.' });
+    
+    try {
+        const sellerResult = await sql`SELECT id, email FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
+            console.warn(`[CLICK INFO] Tentativa de consulta com API Key inválida: ${apiKey}`);
+            return res.status(401).json({ message: 'API Key inválida.' });
+        }
+        
+        const seller_id = sellerResult[0].id;
+        const seller_email = sellerResult[0].email;
+        
+        const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
+        
+        const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
+        
+        if (clickResult.length === 0) {
+            console.warn(`[CLICK INFO NOT FOUND] Vendedor (ID: ${seller_id}, Email: ${seller_email}) tentou consultar o click_id "${click_id}", mas não foi encontrado.`);
+            return res.status(404).json({ message: 'Click ID não encontrado para este vendedor.' });
+        }
+        
+        const clickInfo = clickResult[0];
+        res.status(200).json({ status: 'success', city: clickInfo.city, state: clickInfo.state });
+
+    } catch (error) {
+        console.error("Erro ao consultar informações do clique:", error);
+        res.status(500).json({ message: 'Erro interno ao consultar informações do clique.' });
+    }
+});
+app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
+    try {
+        const sellerId = req.user.id;
+        let { startDate, endDate } = req.query;
+        const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
+
+        if (hasDateFilter) {
+        }
+
+        const totalClicksQuery = hasDateFilter
+            ? sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId}`;
+
+        const pixGeneratedQuery = hasDateFilter
+            ? sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.created_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId}`;
+
+        const pixPaidQuery = hasDateFilter
+            ? sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate}`
+            : sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
+
+        const botsPerformanceQuery = hasDateFilter
+            ? sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
+            : sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
+
+        const clicksByStateQuery = hasDateFilter
+             ? sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
+             : sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`;
+
+        const userTimezone = 'America/Sao_Paulo'; // Fuso horário de referência para o dashboard
+        const dailyRevenueQuery = hasDateFilter
+             ? sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY 1 ORDER BY 1 ASC`
+             : sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY 1 ORDER BY 1 ASC`;
+        
+        const trafficSourceQuery = hasDateFilter
+            ? sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY source ORDER BY clicks DESC`
+            : sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY source ORDER BY clicks DESC`;
+
+        const topPlacementsQuery = hasDateFilter
+            ? sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY placement ORDER BY clicks DESC LIMIT 10`
+            : sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL GROUP BY placement ORDER BY clicks DESC LIMIT 10`;
+        
+        const deviceOSQuery = hasDateFilter
+            ? sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY os ORDER BY clicks DESC`
+            : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
+
+        const [
+               totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
+               clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
+        ] = await Promise.all([
+              totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
+              clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
+              deviceOSQuery
+        ]);
+
+        const totalClicks = totalClicksResult[0].count;
+        const totalPixGenerated = pixGeneratedResult[0].total;
+        const totalRevenue = pixGeneratedResult[0].revenue;
+        const totalPixPaid = pixPaidResult[0].total;
+        const paidRevenue = pixPaidResult[0].revenue;
+        
+        res.status(200).json({
+            total_clicks: parseInt(totalClicks),
+            total_pix_generated: parseInt(totalPixGenerated),
+            total_pix_paid: parseInt(totalPixPaid),
+            total_revenue: parseFloat(totalRevenue),
+            paid_revenue: parseFloat(paidRevenue),
+            bots_performance: botsPerformance.map(b => ({ ...b, total_clicks: parseInt(b.total_clicks), total_pix_paid: parseInt(b.total_pix_paid), paid_revenue: parseFloat(b.paid_revenue) })),
+            clicks_by_state: clicksByState.map(s => ({ ...s, total_clicks: parseInt(s.total_clicks) })),
+            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) })),
+            traffic_source: trafficSource.map(s => ({ ...s, clicks: parseInt(s.clicks) })),
+            top_placements: topPlacements.map(p => ({ ...p, clicks: parseInt(p.clicks) })),
+            device_os: deviceOS.map(d => ({ ...d, clicks: parseInt(d.clicks) }))
+        });
+    } catch (error) {
+        console.error("Erro ao buscar métricas do dashboard:", error);
+        res.status(500).json({ message: 'Erro interno do servidor.' });
+    }
+});
+app.get('/api/transactions', authenticateJwt, async (req, res) => {
+    try {
+        const sellerId = req.user.id;
+        const transactions = await sql`
+            SELECT pt.status, pt.pix_value, COALESCE(tb.bot_name, ch.name, 'Checkout') as source_name, pt.provider, pt.created_at
+            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            LEFT JOIN pressels p ON c.pressel_id = p.id LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
+            LEFT JOIN checkouts ch ON c.checkout_id = ch.id WHERE c.seller_id = ${sellerId}
+            ORDER BY pt.created_at DESC;`;
+        res.status(200).json(transactions);
+    } catch (error) {
+        console.error("Erro ao buscar transações:", error);
+        res.status(500).json({ message: 'Erro ao buscar dados das transações.' });
+    }
+});
+app.post('/api/pix/generate', logApiRequest, async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const { click_id, value_cents, customer, product } = req.body;
+    
+    if (!apiKey || !click_id || !value_cents) return res.status(400).json({ message: 'API Key, click_id e value_cents são obrigatórios.' });
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
+        if (!seller) return res.status(401).json({ message: 'API Key inválida.' });
+
+        if (adminSubscription) {
+            const payload = JSON.stringify({
+                title: 'PIX Gerado',
+                body: `Um PIX de R$ ${(value_cents / 100).toFixed(2)} foi gerado por ${seller.name}.`,
+            });
+            webpush.sendNotification(adminSubscription, payload).catch(err => console.error(err));
+        }
+
+        const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
+        
+        const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
+        if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
+        
+        const providerOrder = [ seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary ].filter(Boolean);
+        let lastError = null;
+
+        for (const provider of providerOrder) {
+            try {
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
+                const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
+                
+                if (click.pressel_id) {
+                    await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
+                }
+
+                const customerDataForUtmify = customer || { name: "Cliente Interessado", email: "cliente@email.com" };
+                const productDataForUtmify = product || { id: "prod_1", name: "Produto Ofertado" };
+                await sendEventToUtmify('waiting_payment', click, { provider_transaction_id: pixResult.transaction_id, pix_value: value_cents / 100, created_at: new Date() }, seller, customerDataForUtmify, productDataForUtmify);
+                
+                return res.status(200).json(pixResult);
+            } catch (error) {
+                console.error(`[PIX GENERATE FALLBACK] Falha ao gerar PIX com ${provider}:`, error.message);
+                lastError = error;
+            }
+        }
+
+        console.error(`[PIX GENERATE FINAL ERROR] Seller ID: ${seller?.id}, Email: ${seller?.email} - Todas as tentativas falharam. Último erro:`, lastError?.message || lastError);
+        return res.status(500).json({ message: 'Não foi possível gerar o PIX. Todos os provedores falharam.' });
+
+    } catch (error) {
+        console.error(`[PIX GENERATE ERROR] Erro geral na rota:`, error.message);
+        res.status(500).json({ message: 'Erro interno ao processar a geração de PIX.' });
+    }
+});
+app.get('/api/pix/status/:transaction_id', async (req, res) => {
+    const apiKey = req.headers['x-api-key'];
+    const { transaction_id } = req.params;
+
+    if (!apiKey) return res.status(401).json({ message: 'API Key não fornecida.' });
+    if (!transaction_id) return res.status(400).json({ message: 'ID da transação é obrigatório.' });
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE api_key = ${apiKey}`;
+        if (!seller) {
+            return res.status(401).json({ message: 'API Key inválida.' });
+        }
+        
+        const [transaction] = await sql`
+            SELECT pt.* FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id}) AND c.seller_id = ${seller.id}`;
+
+        if (!transaction) {
+            return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
+        }
+        
+        if (transaction.status === 'paid') {
+            return res.status(200).json({ status: 'paid' });
+        }
+        
+        if (transaction.provider === 'oasyfy' || transaction.provider === 'cnpay') {
+            return res.status(200).json({ status: 'pending', message: 'Aguardando confirmação via webhook.' });
+        }
+
+        let providerStatus, customerData = {};
+        try {
+            if (transaction.provider === 'syncpay') {
+                const syncPayToken = await getSyncPayAuthToken(seller);
+                const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
+                    headers: { 'Authorization': `Bearer ${syncPayToken}` }
+                });
+                providerStatus = response.data.status;
+                customerData = response.data.payer;
+            } else if (transaction.provider === 'pushinpay') {
+                const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+                providerStatus = response.data.status;
+                customerData = { name: response.data.payer_name, document: response.data.payer_document };
+            }
+        } catch (providerError) {
+             console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
+             return res.status(200).json({ status: 'pending' });
+        }
+
+        if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
+            await handleSuccessfulPayment(transaction.id, customerData);
+            return res.status(200).json({ status: 'paid' });
+        }
+
+        res.status(200).json({ status: 'pending' });
+
+    } catch (error) {
+        console.error("Erro ao consultar status da transação:", error);
+        res.status(500).json({ message: 'Erro interno ao consultar o status.' });
+    }
+});
+app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    const { provider } = req.body;
+
+    if (!provider) {
+        return res.status(400).json({ message: 'O nome do provedor é obrigatório.' });
+    }
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        
+        const value_cents = 50;
+        const startTime = Date.now();
+        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+        const endTime = Date.now();
+        const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+
+        res.status(200).json({
+            provider: provider.toUpperCase(),
+            acquirer: pixResult.acquirer,
+            responseTime: responseTime,
+            qr_code_text: pixResult.qr_code_text
+        });
+
+    } catch (error) {
+        console.error(`[PIX TEST ERROR] Seller ID: ${sellerId}, Provider: ${provider} - Erro:`, error.response?.data || error.message);
+        res.status(500).json({ 
+            message: `Falha ao gerar PIX de teste com ${provider.toUpperCase()}. Verifique as credenciais.`, 
+            details: error.response?.data?.message || error.message 
+        });
+    }
+});
+app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    let testLog = [];
+
+    try {
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
+        
+        const providerOrder = [
+            { name: seller.pix_provider_primary, position: 'Primário' },
+            { name: seller.pix_provider_secondary, position: 'Secundário' },
+            { name: seller.pix_provider_tertiary, position: 'Terciário' }
+        ].filter(p => p.name); 
+
+        if (providerOrder.length === 0) {
+            return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
+        }
+
+        const value_cents = 50;
+
+        for (const providerInfo of providerOrder) {
+            const provider = providerInfo.name;
+            const position = providerInfo.position;
+            
+            try {
+                const startTime = Date.now();
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                const endTime = Date.now();
+                const responseTime = ((endTime - startTime) / 1000).toFixed(2);
+
+                testLog.push(`SUCESSO com Provedor ${position} (${provider.toUpperCase()}).`);
+                return res.status(200).json({
+                    success: true, position: position, provider: provider.toUpperCase(),
+                    acquirer: pixResult.acquirer, responseTime: responseTime,
+                    qr_code_text: pixResult.qr_code_text, log: testLog
+                });
+
+            } catch (error) {
+                const errorMessage = error.response?.data?.details || error.message;
+                console.error(`Falha no provedor ${position} (${provider}):`, errorMessage);
+                testLog.push(`FALHA com Provedor ${position} (${provider.toUpperCase()}): ${errorMessage}`);
+            }
+        }
+
+        console.error("Todos os provedores na rota de prioridade falharam.");
+        return res.status(500).json({
+            success: false, message: 'Todos os provedores configurados na sua rota de prioridade falharam.',
+            log: testLog
+        });
+
+    } catch (error) {
+        console.error(`[PIX PRIORITY TEST ERROR] Erro geral:`, error.message);
+        res.status(500).json({ 
+            success: false, message: 'Ocorreu um erro inesperado ao testar a rota de prioridade.',
+            log: testLog
+        });
+    }
+});
 
 // ==========================================================
-//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (VERSÃO FINAL E CORRIGIDA)
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (VERSÃO FINAL)
 // ==========================================================
 function findNextNode(currentNodeId, handleId, edges) {
-    const edge = edges.find(edge => {
-        if (handleId) {
-            return edge.source === currentNodeId && edge.sourceHandle === handleId;
-        }
-        return edge.source === currentNodeId && (edge.sourceHandle === null || edge.sourceHandle === undefined);
-    });
+    const edge = edges.find(edge => edge.source === currentNodeId && (edge.sourceHandle === handleId || !edge.sourceHandle || handleId === null));
     return edge ? edge.target : null;
 }
 
@@ -766,7 +1410,7 @@ async function sendTypingAction(chatId, botToken) {
             action: 'typing',
         });
     } catch (error) {
-        console.warn(`[Flow Engine] Falha ao enviar ação 'typing' para ${chatId}.`);
+        console.warn(`[Flow Engine] Falha ao enviar ação 'typing' para ${chatId}:`, error.response?.data || error.message);
     }
 }
 
@@ -781,11 +1425,14 @@ async function sendMessage(chatId, text, botToken, sellerId, botId, showTyping) 
             typingDuration = Math.min(2000, typingDuration);
             await new Promise(resolve => setTimeout(resolve, typingDuration));
         }
+
         const response = await axios.post(apiUrl, { chat_id: chatId, text: text, parse_mode: 'HTML' });
+        
         if (response.data.ok) {
             const sentMessage = response.data.result;
             const [botInfo] = await sql`SELECT bot_name FROM telegram_bots WHERE id = ${botId}`;
             const botName = botInfo ? botInfo.bot_name : 'Bot';
+
             await sql`
                 INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, message_text, sender_type)
                 VALUES (${sellerId}, ${botId}, ${chatId}, ${sentMessage.message_id}, ${sentMessage.from.id}, ${botName}, '(Fluxo)', ${text}, 'bot')
@@ -793,14 +1440,17 @@ async function sendMessage(chatId, text, botToken, sellerId, botId, showTyping) 
             `;
         }
     } catch (error) {
-        console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}.`);
+        console.error(`[Flow Engine] Erro ao enviar/salvar mensagem para ${chatId}:`, error.response?.data || error.message);
     }
 }
 
 async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null, initialVariables = {}) {
-    console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}. Variáveis: ${JSON.stringify(initialVariables)}`);
+    console.log(`[Flow Engine] Iniciando processo para ${chatId}. Nó inicial: ${startNodeId || 'Padrão'}`);
     const [flow] = await sql`SELECT * FROM flows WHERE bot_id = ${botId} ORDER BY updated_at DESC LIMIT 1`;
-    if (!flow || !flow.nodes) return;
+    if (!flow || !flow.nodes) {
+        console.log(`[Flow Engine] Nenhum fluxo ativo encontrado para o bot ID ${botId}.`);
+        return;
+    }
 
     const flowData = typeof flow.nodes === 'string' ? JSON.parse(flow.nodes) : flow.nodes;
     const nodes = flowData.nodes || [];
@@ -812,17 +1462,20 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     if (!currentNodeId) {
         const [userState] = await sql`SELECT * FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
         if (userState && userState.waiting_for_input) {
-            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id}.`);
+            console.log(`[Flow Engine] Usuário ${chatId} respondeu. Continuando do nó ${userState.current_node_id} pelo caminho 'com resposta'.`);
             currentNodeId = findNextNode(userState.current_node_id, 'a', edges);
             variables = userState.variables;
         } else {
-            console.log(`[Flow Engine] Iniciando novo fluxo para ${chatId} do gatilho.`);
+            console.log(`[Flow Engine] Iniciando novo fluxo para ${chatId} a partir do gatilho.`);
             const startNode = nodes.find(node => node.type === 'trigger');
-            if (startNode) currentNodeId = findNextNode(startNode.id, null, edges);
+            if (startNode) {
+                currentNodeId = findNextNode(startNode.id, null, edges);
+            }
         }
     }
 
     if (!currentNodeId) {
+        console.log(`[Flow Engine] Fim do fluxo ou nenhum nó inicial encontrado para ${chatId}.`);
         await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
         return;
     }
@@ -830,87 +1483,110 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
     let safetyLock = 0;
     while (currentNodeId && safetyLock < 20) {
         const currentNode = nodes.find(node => node.id === currentNodeId);
-        if (!currentNode) break;
+        if (!currentNode) {
+            console.error(`[Flow Engine] Erro: Nó ${currentNodeId} não encontrado no fluxo.`);
+            break;
+        }
 
         await sql`
             INSERT INTO user_flow_states (chat_id, bot_id, current_node_id, variables, waiting_for_input)
-            VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}::jsonb, false)
+            VALUES (${chatId}, ${botId}, ${currentNodeId}, ${JSON.stringify(variables)}, false)
             ON CONFLICT (chat_id, bot_id)
             DO UPDATE SET current_node_id = EXCLUDED.current_node_id, variables = EXCLUDED.variables, waiting_for_input = false;
         `;
 
         switch (currentNode.type) {
             case 'message':
-                if (currentNode.data.typingDelay > 0) await new Promise(resolve => setTimeout(resolve, currentNode.data.typingDelay * 1000));
+                if (currentNode.data.typingDelay && currentNode.data.typingDelay > 0) {
+                    await new Promise(resolve => setTimeout(resolve, currentNode.data.typingDelay * 1000));
+                }
                 await sendMessage(chatId, currentNode.data.text, botToken, sellerId, botId, currentNode.data.showTyping);
+
                 if (currentNode.data.waitForReply) {
                     await sql`UPDATE user_flow_states SET waiting_for_input = true WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                    const timeoutMinutes = currentNode.data.replyTimeout || 5;
                     const noReplyNodeId = findNextNode(currentNode.id, 'b', edges);
-                    if (noReplyNodeId) {
-                        const timeoutMinutes = currentNode.data.replyTimeout || 5;
+                    
+                    if(noReplyNodeId){
                         console.log(`[Flow Engine] Agendando timeout de ${timeoutMinutes} min para o nó ${noReplyNodeId}`);
                         await sql`
                             INSERT INTO flow_timeouts (chat_id, bot_id, execute_at, target_node_id, variables)
-                            VALUES (${chatId}, ${botId}, NOW() + INTERVAL '${timeoutMinutes} minutes', ${noReplyNodeId}, ${JSON.stringify(variables)}::jsonb)
+                            VALUES (${chatId}, ${botId}, NOW() + INTERVAL '${timeoutMinutes} minutes', ${noReplyNodeId}, ${JSON.stringify(variables)})
                         `;
                     }
-                    currentNodeId = null;
+                    currentNodeId = null; 
                 } else {
                     currentNodeId = findNextNode(currentNodeId, 'a', edges);
                 }
                 break;
+
             case 'delay':
-                await new Promise(resolve => setTimeout(resolve, (currentNode.data.delayInSeconds || 1) * 1000));
+                const delaySeconds = currentNode.data.delayInSeconds || 1;
+                await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
+            
             case 'action_pix':
                 try {
-                    const { valueInCents } = currentNode.data;
-                    if (!valueInCents) throw new Error("Valor do PIX não definido.");
+                    const valueInCents = currentNode.data.valueInCents;
+                    if (!valueInCents) throw new Error("Valor do PIX não definido no nó do fluxo.");
+                    
                     const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
                     const [userFlowState] = await sql`SELECT variables FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-                    const { click_id } = userFlowState.variables;
-                    if (!click_id) throw new Error("Click ID não encontrado.");
+                    const click_id = userFlowState.variables.click_id;
+                    if (!click_id) throw new Error("Click ID não encontrado nas variáveis do fluxo.");
+                    
                     const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${click_id} AND seller_id = ${sellerId}`;
-                    if (!click) throw new Error("Dados do clique não encontrados.");
-                    const pixResult = await generatePixForProvider(seller.pix_provider_primary || 'pushinpay', seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
+                    if (!click) throw new Error("Dados do clique não encontrados para gerar o PIX.");
+
+                    const provider = seller.pix_provider_primary || 'pushinpay';
+                    const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
+                    
                     await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${valueInCents / 100}, ${pixResult.qr_code_text}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
+                    
                     variables.last_transaction_id = pixResult.transaction_id;
-                    await sql`UPDATE user_flow_states SET variables = ${JSON.stringify(variables)}::jsonb WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                    await sql`UPDATE user_flow_states SET variables = ${JSON.stringify(variables)} WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+                    
                     await sendMessage(chatId, `Pix copia e cola gerado:\n\n\`${pixResult.qr_code_text}\``, botToken, sellerId, botId, true);
                 } catch (error) {
                     console.error("[Flow Engine] Erro ao gerar PIX:", error);
-                    await sendMessage(chatId, "Desculpe, não consegui gerar o PIX.", botToken, sellerId, botId, true);
+                    await sendMessage(chatId, "Desculpe, não consegui gerar o PIX neste momento. Tente novamente mais tarde.", botToken, sellerId, botId, true);
                 }
                 currentNodeId = findNextNode(currentNodeId, null, edges);
                 break;
+
             case 'action_check_pix':
                 try {
-                    const { last_transaction_id } = variables;
-                    if (!last_transaction_id) throw new Error("Nenhum PIX gerado para consultar.");
-                    const [transaction] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${last_transaction_id}`;
-                    if (!transaction) throw new Error("Transação não encontrada.");
+                    const transactionId = variables.last_transaction_id;
+                    if (!transactionId) throw new Error("Nenhum ID de transação PIX encontrado para consultar.");
+                    
+                    const [transaction] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId}`;
+                    
+                    if (!transaction) throw new Error(`Transação ${transactionId} não encontrada.`);
+
                     if (transaction.status === 'paid') {
                         await sendMessage(chatId, "Pagamento confirmado! ✅", botToken, sellerId, botId, true);
-                        currentNodeId = findNextNode(currentNodeId, 'a', edges); // Pago
+                        currentNodeId = findNextNode(currentNodeId, 'a', edges); // Caminho 'Pago'
                     } else {
-                        await sendMessage(chatId, "Ainda estamos aguardando o pagamento.", botToken, sellerId, botId, true);
-                        currentNodeId = findNextNode(currentNodeId, 'b', edges); // Pendente
+                         await sendMessage(chatId, "Ainda estamos aguardando o pagamento.", botToken, sellerId, botId, true);
+                        currentNodeId = findNextNode(currentNodeId, 'b', edges); // Caminho 'Pendente'
                     }
                 } catch (error) {
                      console.error("[Flow Engine] Erro ao consultar PIX:", error);
-                     await sendMessage(chatId, "Não consegui consultar o status do PIX.", botToken, sellerId, botId, true);
+                     await sendMessage(chatId, "Não consegui consultar o status do PIX agora.", botToken, sellerId, botId, true);
                      currentNodeId = findNextNode(currentNodeId, 'b', edges);
                 }
                 break;
+
             default:
-                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}.`);
+                console.warn(`[Flow Engine] Tipo de nó desconhecido: ${currentNode.type}. Parando fluxo.`);
                 currentNodeId = null;
                 break;
         }
+
         if (!currentNodeId) {
             const pendingTimeouts = await sql`SELECT 1 FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
-            if (pendingTimeouts.length === 0) {
+            if(pendingTimeouts.length === 0){
                  await sql`DELETE FROM user_flow_states WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
             }
         }
@@ -919,31 +1595,49 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
 }
 
 app.post('/api/webhook/telegram/:botId', async (req, res) => {
-    res.sendStatus(200);
     const { botId } = req.params;
-    const { message } = req.body;
-    if (!message || !message.chat?.id || !message.text) return;
-    const { id: chatId } = message.chat;
+    const body = req.body;
+    res.sendStatus(200);
+
     try {
+        const message = body.message;
+        const chatId = message?.chat?.id;
+        if (!chatId || !message.text) return;
+        
         await sql`DELETE FROM flow_timeouts WHERE chat_id = ${chatId} AND bot_id = ${botId}`;
+
         const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${botId}`;
-        if (!bot) return;
+        if (!bot) {
+            console.warn(`[Webhook] Webhook recebido para botId não encontrado: ${botId}`);
+            return;
+        }
+        
         const { seller_id: sellerId, bot_token: botToken } = bot;
-        const { text } = message;
+        
+        const text = message.text;
         const isStartCommand = text.startsWith('/start ');
         const clickIdValue = isStartCommand ? text : null;
+
+        const [existingUser] = await sql`SELECT 1 FROM telegram_chats WHERE chat_id = ${chatId} AND bot_id = ${botId} LIMIT 1`;
+        
         await sql`
             INSERT INTO telegram_chats (seller_id, bot_id, chat_id, message_id, user_id, first_name, last_name, username, click_id, message_text, sender_type)
             VALUES (${sellerId}, ${botId}, ${chatId}, ${message.message_id}, ${message.from.id}, ${message.from.first_name}, ${message.from.last_name || null}, ${message.from.username || null}, ${clickIdValue}, ${text}, 'user')
             ON CONFLICT (chat_id, message_id) DO NOTHING;
         `;
+        
         let initialVars = {};
-        if (isStartCommand) initialVars.click_id = clickIdValue;
+        if (isStartCommand) {
+            initialVars.click_id = clickIdValue;
+        }
+        
         await processFlow(chatId, botId, botToken, sellerId, null, initialVars);
+
     } catch (error) {
         console.error("Erro CRÍTICO ao processar webhook do Telegram:", error);
     }
 });
+
 
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
@@ -1091,27 +1785,41 @@ app.post('/api/webhook/oasyfy', async (req, res) => {
     }
     res.sendStatus(200);
 });
+
 async function sendEventToUtmify(status, clickData, pixData, sellerData, customerData, productData) {
     console.log(`[Utmify] Iniciando envio de evento '${status}' para o clique ID: ${clickData.id}`);
     try {
         let integrationId = null;
+
         if (clickData.pressel_id) {
+            console.log(`[Utmify] Clique originado da Pressel ID: ${clickData.pressel_id}`);
             const [pressel] = await sql`SELECT utmify_integration_id FROM pressels WHERE id = ${clickData.pressel_id}`;
-            if (pressel) integrationId = pressel.utmify_integration_id;
+            if (pressel) {
+                integrationId = pressel.utmify_integration_id;
+            }
+        } else if (clickData.checkout_id) {
+            console.log(`[Utmify] Clique originado do Checkout ID: ${clickData.checkout_id}. Lógica de associação não implementada para checkouts.`);
         }
+
         if (!integrationId) {
-            console.log(`[Utmify] Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}.`);
+            console.log(`[Utmify] Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}. Abortando envio.`);
             return;
         }
+
+        console.log(`[Utmify] Integração vinculada ID: ${integrationId}. Buscando token...`);
         const [integration] = await sql`
             SELECT api_token FROM utmify_integrations 
             WHERE id = ${integrationId} AND seller_id = ${sellerData.id}
         `;
+
         if (!integration || !integration.api_token) {
-            console.error(`[Utmify] ERRO: Token não encontrado para a integração ID ${integrationId}.`);
+            console.error(`[Utmify] ERRO: Token não encontrado para a integração ID ${integrationId} do vendedor ${sellerData.id}.`);
             return;
         }
+
         const utmifyApiToken = integration.api_token;
+        console.log(`[Utmify] Token encontrado. Montando payload...`);
+        
         const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
         const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
         const payload = {
@@ -1123,8 +1831,10 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
             commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299)) },
             isTest: false
         };
+
         await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, { headers: { 'x-api-token': utmifyApiToken } });
         console.log(`[Utmify] SUCESSO: Evento '${status}' do pedido ${payload.orderId} enviado para a conta Utmify (Integração ID: ${integrationId}).`);
+
     } catch (error) {
         console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
     }
@@ -1137,21 +1847,25 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         } else if (clickData.checkout_id) {
             presselPixels = await sql`SELECT pixel_config_id FROM checkout_pixels WHERE checkout_id = ${clickData.checkout_id}`;
         }
+
         if (presselPixels.length === 0) {
             console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}.`);
             return;
         }
+
         const userData = {
             fbp: clickData.fbp || undefined,
             fbc: clickData.fbc || undefined,
             external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
         };
+
         if (clickData.ip_address && clickData.ip_address !== '::1' && !clickData.ip_address.startsWith('127.0.0.1')) {
             userData.client_ip_address = clickData.ip_address;
         }
         if (clickData.user_agent && clickData.user_agent.length > 10) { 
             userData.client_user_agent = clickData.user_agent;
         }
+
         if (customerData?.name) {
             const nameParts = customerData.name.trim().split(' ');
             const firstName = nameParts[0].toLowerCase();
@@ -1161,16 +1875,20 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                 userData.ln = crypto.createHash('sha256').update(lastName).digest('hex');
             }
         }
+
         const city = clickData.city && clickData.city !== 'Desconhecida' ? clickData.city.toLowerCase().replace(/[^a-z]/g, '') : null;
         const state = clickData.state && clickData.state !== 'Desconhecido' ? clickData.state.toLowerCase().replace(/[^a-z]/g, '') : null;
         if (city) userData.ct = crypto.createHash('sha256').update(city).digest('hex');
         if (state) userData.st = crypto.createHash('sha256').update(state).digest('hex');
+
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
+        
         for (const { pixel_config_id } of presselPixels) {
             const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
             if (pixelConfig) {
                 const { pixel_id, meta_api_token } = pixelConfig;
                 const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
+                
                 const payload = {
                     data: [{
                         event_name: eventName,
@@ -1183,12 +1901,15 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                         },
                     }]
                 };
+                
                 if (eventName !== 'Purchase') {
                     delete payload.data[0].custom_data.value;
                 }
+
                 console.log(`[Meta Pixel] Enviando payload para o pixel ${pixel_id}:`, JSON.stringify(payload, null, 2));
                 await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
                 console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
+
                 if (eventName === 'Purchase') {
                      await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
                 }
@@ -1203,12 +1924,21 @@ async function checkPendingTransactions() {
         const pendingTransactions = await sql`
             SELECT id, provider, provider_transaction_id, click_id_internal, status
             FROM pix_transactions WHERE status = 'pending' AND created_at > NOW() - INTERVAL '30 minutes'`;
+
         if (pendingTransactions.length === 0) return;
+        
         for (const tx of pendingTransactions) {
-            if (tx.provider === 'oasyfy' || tx.provider === 'cnpay') continue;
+            if (tx.provider === 'oasyfy' || tx.provider === 'cnpay') {
+                continue;
+            }
+
             try {
-                const [seller] = await sql`SELECT * FROM sellers s JOIN clicks c ON c.seller_id = s.id WHERE c.id = ${tx.click_id_internal}`;
+                const [seller] = await sql`
+                    SELECT *
+                    FROM sellers s JOIN clicks c ON c.seller_id = s.id
+                    WHERE c.id = ${tx.click_id_internal}`;
                 if (!seller) continue;
+
                 let providerStatus, customerData = {};
                 if (tx.provider === 'syncpay') {
                     const syncPayToken = await getSyncPayAuthToken(seller);
@@ -1220,6 +1950,7 @@ async function checkPendingTransactions() {
                     providerStatus = response.data.status;
                     customerData = { name: response.data.payer_name, document: response.data.payer_document };
                 }
+                
                 if ((providerStatus === 'paid' || providerStatus === 'COMPLETED') && tx.status !== 'paid') {
                      await handleSuccessfulPayment(tx.id, customerData);
                 }
@@ -1234,6 +1965,9 @@ async function checkPendingTransactions() {
         console.error("Erro na rotina de verificação geral:", error.message);
     }
 }
+// ==========================================================
+//          ROTAS PARA O CRIADOR DE FLUXOS E CHAT
+// ==========================================================
 const createInitialFlowStructure = () => ({
     nodes: [{ id: 'start', type: 'trigger', position: { x: 250, y: 50 }, data: {} }],
     edges: []
@@ -1244,7 +1978,12 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
             SELECT f.* FROM flows f
             WHERE f.seller_id = ${req.user.id} 
             ORDER BY f.created_at DESC`;
-        const safeFlows = flows.map(flow => ({ ...flow, nodes: flow.nodes || JSON.stringify(createInitialFlowStructure()) }));
+        
+        const safeFlows = flows.map(flow => ({
+            ...flow,
+            nodes: flow.nodes || JSON.stringify(createInitialFlowStructure())
+        }));
+
         res.status(200).json(safeFlows);
     } catch (error) {
         console.error("Erro ao buscar fluxos:", error);
@@ -1254,15 +1993,19 @@ app.get('/api/flows', authenticateJwt, async (req, res) => {
 app.post('/api/flows', authenticateJwt, async (req, res) => {
     const { name, botId } = req.body;
     const sellerId = req.user.id; 
+
     if (!name || !botId) {
         return res.status(400).json({ message: 'Nome do fluxo e ID do bot são obrigatórios.' });
     }
+    
     try {
         const initialFlow = createInitialFlowStructure();
+        
         const [newFlow] = await sql`
             INSERT INTO flows (seller_id, bot_id, name, nodes) 
             VALUES (${sellerId}, ${botId}, ${name}, ${JSON.stringify(initialFlow)}) 
             RETURNING *;`;
+            
         res.status(201).json(newFlow);
     } catch (error) {
         console.error("Erro ao criar fluxo:", error);
@@ -1275,12 +2018,14 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
     if (!name || !nodes) {
         return res.status(400).json({ message: 'Nome e estrutura de nós são obrigatórios.' });
     }
+
     try {
         const [updatedFlow] = await sql`
             UPDATE flows
             SET name = ${name}, nodes = ${nodes}, updated_at = CURRENT_TIMESTAMP
             WHERE id = ${id} AND seller_id = ${req.user.id}
             RETURNING *;`;
+            
         if (updatedFlow) {
             res.status(200).json(updatedFlow);
         } else {
@@ -1294,10 +2039,12 @@ app.put('/api/flows/:id', authenticateJwt, async (req, res) => {
 app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     const sellerId = req.user.id;
+
     try {
         const result = await sql`
             DELETE FROM flows
             WHERE id = ${id} AND seller_id = ${sellerId}`;
+        
         if (result.count > 0) {
             res.status(204).send();
         } else {
@@ -1311,11 +2058,13 @@ app.delete('/api/flows/:id', authenticateJwt, async (req, res) => {
 app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const sellerId = req.user.id;
+
     try {
         const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
+        
         const users = await sql`
             SELECT tc1.*
             FROM telegram_chats tc1
@@ -1328,6 +2077,7 @@ app.get('/api/chats/:botId', authenticateJwt, async (req, res) => {
             WHERE tc1.bot_id = ${botId} AND tc1.seller_id = ${sellerId}
             ORDER BY tc1.created_at DESC;
         `;
+        
         res.status(200).json(users);
     } catch (error) {
         console.error("Erro ao buscar usuários do chat:", error);
@@ -1338,11 +2088,13 @@ app.get('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId } = req.params;
     const chatId = parseInt(req.params.chatId, 10);
     const sellerId = req.user.id;
+
     try {
         const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
+
         const messages = await sql`
             SELECT * FROM telegram_chats 
             WHERE bot_id = ${botId} AND chat_id = ${chatId}
@@ -1358,21 +2110,26 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
     const { botId } = req.params;
     const { chatId, text } = req.body;
     const sellerId = req.user.id;
+
     if (!chatId || !text) {
         return res.status(400).json({ message: 'Chat ID e texto da mensagem são obrigatórios.' });
     }
+
     try {
         const [bot] = await sql`
             SELECT bot_token, (SELECT name FROM sellers WHERE id = ${sellerId}) as seller_name 
             FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
+        
         if (!bot || !bot.bot_token) {
             return res.status(404).json({ message: 'Bot não encontrado ou sem token.' });
         }
+
         const telegramApiUrl = `https://api.telegram.org/bot${bot.bot_token}/sendMessage`;
         const response = await axios.post(telegramApiUrl, {
             chat_id: chatId,
             text: text,
         });
+
         if (response.data.ok) {
             const sentMessage = response.data.result;
             await sql`
@@ -1386,6 +2143,7 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
         } else {
             throw new Error('Telegram API retornou um erro.');
         }
+
     } catch (error) {
         console.error("Erro ao enviar mensagem:", error);
         res.status(500).json({ message: 'Não foi possível enviar a mensagem.' });
@@ -1394,19 +2152,25 @@ app.post('/api/chats/:botId/send-message', authenticateJwt, async (req, res) => 
 app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
     const { botId, chatId } = req.params;
     const sellerId = req.user.id;
+
     try {
         const [bot] = await sql`SELECT id FROM telegram_bots WHERE id = ${botId} AND seller_id = ${sellerId}`;
         if (!bot) {
             return res.status(404).json({ message: 'Bot não encontrado ou não autorizado.' });
         }
+        
         await sql`BEGIN`;
+        
         await sql`
             DELETE FROM user_flow_states 
             WHERE bot_id = ${botId} AND chat_id = ${chatId}`;
+            
         await sql`
             DELETE FROM telegram_chats 
             WHERE bot_id = ${botId} AND chat_id = ${chatId} AND seller_id = ${sellerId}`;
+            
         await sql`COMMIT`;
+        
         res.status(204).send();
     } catch (error) {
         await sql`ROLLBACK`;
