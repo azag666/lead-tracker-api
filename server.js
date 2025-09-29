@@ -2183,7 +2183,7 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
-// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT (VERSÃO CORRIGIDA) ---
+// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT (VERSÃO FINAL E CORRIGIDA) ---
 app.post('/api/manychat/lead', async (req, res) => {
     const apiKey = req.headers['x-api-key']; 
     if (!apiKey) {
@@ -2197,29 +2197,44 @@ app.post('/api/manychat/lead', async (req, res) => {
     }
 
     try {
-        const [seller] = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
-        if (seller.length === 0) {
+        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
             return res.status(403).json({ message: 'API Key inválida.' });
         }
-        const sellerId = seller.id;
+        const sellerId = sellerResult[0].id;
         
-        const [bot] = await sql`SELECT id FROM telegram_bots WHERE bot_name = ${bot_name} AND seller_id = ${sellerId}`;
-        if (bot.length === 0) {
+        const botResult = await sql`SELECT id FROM telegram_bots WHERE bot_name = ${bot_name} AND seller_id = ${sellerId}`;
+        if (botResult.length === 0) {
             return res.status(404).json({ message: `Bot com o nome '${bot_name}' não foi encontrado para este vendedor.` });
         }
-        const botId = bot.id;
+        const botId = botResult[0].id;
 
-        // Salva ou atualiza os dados do lead no banco de dados.
-        await sql`
-            INSERT INTO telegram_chats 
-                (seller_id, bot_id, chat_id, first_name, last_name, username, sender_type, message_text)
-            VALUES 
-                (${sellerId}, ${botId}, ${chat_id}, ${first_name || 'Lead'}, ${last_name || ''}, ${username || null}, 'user', 'Lead capturado via ManyChat')
-            ON CONFLICT (chat_id, bot_id) DO UPDATE SET -- Evita duplicados e atualiza dados
-                first_name = EXCLUDED.first_name,
-                last_name = EXCLUDED.last_name,
-                username = EXCLUDED.username;
+        // Passo 1: Verifica se o lead (usuário do chat) já existe
+        const existingLead = await sql`
+            SELECT id FROM telegram_chats 
+            WHERE chat_id = ${chat_id} AND bot_id = ${botId} AND message_text = 'Lead capturado via ManyChat'
+            LIMIT 1;
         `;
+
+        if (existingLead.length > 0) {
+            // Passo 2a: Se existe, atualiza os dados
+            await sql`
+                UPDATE telegram_chats 
+                SET 
+                    first_name = ${first_name || 'Lead'}, 
+                    last_name = ${last_name || ''}, 
+                    username = ${username || null}
+                WHERE id = ${existingLead[0].id};
+            `;
+        } else {
+            // Passo 2b: Se não existe, insere um novo registro
+            await sql`
+                INSERT INTO telegram_chats 
+                    (seller_id, bot_id, chat_id, first_name, last_name, username, sender_type, message_text)
+                VALUES 
+                    (${sellerId}, ${botId}, ${chat_id}, ${first_name || 'Lead'}, ${last_name || ''}, ${username || null}, 'user', 'Lead capturado via ManyChat');
+            `;
+        }
 
         res.status(200).json({ message: 'Lead salvo com sucesso!' });
 
