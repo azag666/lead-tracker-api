@@ -12,56 +12,31 @@ const webpush = require('web-push');
 
 const app = express();
 app.use(cors());
-
-// --- MIDDLEWARES DE PROCESSAMENTO DO CORPO ---
-// O express.json() processa a maioria das rotas que esperam JSON.
-app.use(express.json());
-// Para a rota específica da SyncPay, usamos um middleware que captura o corpo "cru" (raw) para garantir que possamos ler os dados independentemente do Content-Type.
-app.use('/api/webhook/syncpay', express.raw({ type: '*/*' }));
-
+app.use(express.json()); // Middleware global para processar JSON
 
 // --- OTIMIZAÇÃO CRÍTICA: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
 const sql = neon(process.env.DATABASE_URL);
 
 // --- ROTA DO CRON JOB ---
-// Esta rota deve ser chamada por um serviço externo (ex: cron-job.org) a cada minuto
 app.post('/api/cron/process-timeouts', async (req, res) => {
     const cronSecret = process.env.CRON_SECRET;
     if (req.headers['authorization'] !== `Bearer ${cronSecret}`) {
         return res.status(401).send('Unauthorized');
     }
-
     try {
-        console.log('[CRON] Verificando timeouts pendentes...');
-        const pendingTimeouts = await sql`
-            SELECT * FROM flow_timeouts WHERE execute_at <= NOW()
-        `;
-
-        if (pendingTimeouts.length === 0) {
-            console.log('[CRON] Nenhum timeout para processar.');
-            return res.status(200).send('Nenhum timeout para processar.');
-        }
-
-        console.log(`[CRON] Encontrados ${pendingTimeouts.length} timeouts para processar.`);
-
-        for (const timeout of pendingTimeouts) {
-            const { chat_id, bot_id, target_node_id, variables } = timeout;
-
-            // Deleta o timeout antes de processar para evitar re-execução em caso de erro
-            await sql`DELETE FROM flow_timeouts WHERE id = ${timeout.id}`;
-
-            // Verifica se o usuário não interagiu enquanto o cron estava rodando
-            const [userState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chat_id} AND bot_id = ${bot_id}`;
-            
-            if (userState && userState.waiting_for_input) {
-                 const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${bot_id}`;
-                if (!bot) continue;
-
-                console.log(`[CRON] Processando timeout para o chat ${chat_id}, continuando do nó ${target_node_id}`);
-                // Inicia o fluxo a partir do nó de "sem resposta"
-                processFlow(chat_id, bot_id, bot.bot_token, bot.seller_id, target_node_id, variables);
-            } else {
-                console.log(`[CRON] Timeout para chat ${chat_id} ignorado pois o usuário já interagiu.`);
+        const pendingTimeouts = await sql`SELECT * FROM flow_timeouts WHERE execute_at <= NOW()`;
+        if (pendingTimeouts.length > 0) {
+            console.log(`[CRON] Encontrados ${pendingTimeouts.length} timeouts para processar.`);
+            for (const timeout of pendingTimeouts) {
+                const { chat_id, bot_id, target_node_id, variables } = timeout;
+                await sql`DELETE FROM flow_timeouts WHERE id = ${timeout.id}`;
+                const [userState] = await sql`SELECT waiting_for_input FROM user_flow_states WHERE chat_id = ${chat_id} AND bot_id = ${bot_id}`;
+                if (userState && userState.waiting_for_input) {
+                    const [bot] = await sql`SELECT seller_id, bot_token FROM telegram_bots WHERE id = ${bot_id}`;
+                    if (bot) {
+                        processFlow(chat_id, bot_id, bot.bot_token, bot.seller_id, target_node_id, variables);
+                    }
+                }
             }
         }
         res.status(200).send(`Processados ${pendingTimeouts.length} timeouts.`);
@@ -86,13 +61,8 @@ const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
 const CNPAY_SPLIT_PRODUCER_ID = process.env.CNPAY_SPLIT_PRODUCER_ID;
 const OASYFY_SPLIT_PRODUCER_ID = process.env.OASYFY_SPLIT_PRODUCER_ID;
 const ADMIN_API_KEY = process.env.ADMIN_API_KEY;
-
-// URL base da API da SyncPay
 const SYNCPAY_API_BASE_URL = 'https://api.syncpayments.com.br';
-
-// Cache para tokens da SyncPay (evita pedir um token novo a cada PIX)
 const syncPayTokenCache = new Map();
-
 
 // --- MIDDLEWARE DE AUTENTICAÇÃO ---
 async function authenticateJwt(req, res, next) {
@@ -101,10 +71,7 @@ async function authenticateJwt(req, res, next) {
     if (!token) return res.status(401).json({ message: 'Token não fornecido.' });
     
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) {
-            console.error("Erro na verificação do JWT:", err.message);
-            return res.status(403).json({ message: 'Token inválido ou expirado.' });
-        }
+        if (err) return res.status(403).json({ message: 'Token inválido ou expirado.' });
         req.user = user;
         next();
     });
@@ -117,9 +84,7 @@ async function logApiRequest(req, res, next) {
     try {
         const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
         if (sellerResult.length > 0) {
-            const sellerId = sellerResult[0].id;
-            const endpoint = req.path;
-            sql`INSERT INTO api_requests (seller_id, endpoint) VALUES (${sellerId}, ${endpoint})`.catch(err => console.error("Falha ao logar requisição:", err));
+            sql`INSERT INTO api_requests (seller_id, endpoint) VALUES (${sellerResult[0].id}, ${req.path})`.catch(err => console.error("Falha ao logar requisição:", err));
         }
     } catch (error) {
         console.error("Erro no middleware de log:", error);
@@ -128,31 +93,27 @@ async function logApiRequest(req, res, next) {
 }
 
 // --- FUNÇÕES DE LÓGICA DE NEGÓCIO ---
-
 async function getSyncPayAuthToken(seller) {
     const cachedToken = syncPayTokenCache.get(seller.id);
     if (cachedToken && cachedToken.expiresAt > Date.now() + 60000) {
         return cachedToken.accessToken;
     }
-
     if (!seller.syncpay_client_id || !seller.syncpay_client_secret) {
         throw new Error('Credenciais da SyncPay não configuradas para este vendedor.');
     }
-    
     console.log(`[SyncPay] Solicitando novo token para o vendedor ID: ${seller.id}`);
     const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/auth-token`, {
         client_id: seller.syncpay_client_id,
         client_secret: seller.syncpay_client_secret,
     });
-
     const { access_token, expires_in } = response.data;
     const expiresAt = Date.now() + (expires_in * 1000);
-
     syncPayTokenCache.set(seller.id, { accessToken: access_token, expiresAt });
     return access_token;
 }
 
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
+    // ... (O conteúdo desta função permanece inalterado)
     let pixData;
     let acquirer = 'Não identificado';
     const clientPayload = {
@@ -167,25 +128,20 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         const payload = { 
             amount: value_cents / 100, 
             payer: clientPayload,
-            // Adicionando a URL de webhook para a SyncPay saber para onde notificar
             callbackUrl: `https://${host}/api/webhook/syncpay`
         };
         const commission_percentage = 2.99;
-        
         if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
             payload.split = [{
                 percentage: Math.round(commission_percentage), 
                 user_id: process.env.SYNCPAY_SPLIT_ACCOUNT_ID 
             }];
         }
-        
         const response = await axios.post(`${SYNCPAY_API_BASE_URL}/api/partner/v1/cash-in`, payload, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
-        
         pixData = response.data;
         acquirer = "SyncPay";
-        
         return { 
             qr_code_text: pixData.pix_code, 
             qr_code_base64: null, 
@@ -226,7 +182,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             value: value_cents,
             webhook_url: `https://${host}/api/webhook/pushinpay`,
         };
-        
         const commission_cents = Math.floor(value_cents * 0.0299);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && PUSHINPAY_SPLIT_ACCOUNT_ID) {
             payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
@@ -240,6 +195,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
 }
 
 async function handleSuccessfulPayment(transaction_id, customerData) {
+    // ... (O conteúdo desta função permanece inalterado)
     try {
         const [transaction] = await sql`UPDATE pix_transactions SET status = 'paid', paid_at = NOW() WHERE id = ${transaction_id} AND status != 'paid' RETURNING *`;
         if (!transaction) { 
@@ -273,7 +229,6 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
 
             await sendEventToUtmify('paid', click, transaction, seller, finalCustomerData, productData);
             await sendMetaEvent('Purchase', click, transaction, finalCustomerData);
-            // await checkAndAwardAchievements(seller.id); // Função não definida, chamada comentada para evitar erros.
         } else {
             console.error(`[handleSuccessfulPayment] ERRO: Não foi possível encontrar dados do clique ou vendedor para a transação ${transaction_id}`);
         }
@@ -2260,33 +2215,27 @@ app.post('/api/manychat/lead', async (req, res) => {
 });
 
 
-// ROTA DEFINITIVA PARA WEBHOOK DA SYNCPAY
-// Esta rota primeiro captura o corpo da requisição como texto para garantir o log.
-app.use('/api/webhook/syncpay', express.raw({ type: '*/*' }));
-
+// ROTA FINAL E CORRIGIDA PARA WEBHOOK DA SYNCPAY
 app.post('/api/webhook/syncpay', async (req, res) => {
-    // Passo 1: Registar o corpo exato que a SyncPay enviou.
-    const rawBody = req.body.toString();
-    console.log('[Webhook SyncPay] Notificação recebida. Corpo (RAW):', rawBody);
-
+    console.log('[Webhook SyncPay] Notificação recebida.');
+    
     try {
-        // Passo 2: Tentar converter o texto para JSON para poder ser processado.
-        const notification = JSON.parse(rawBody);
+        // req.body já é um objeto JSON porque o express.json() já o processou.
+        const notification = req.body;
+        console.log('[Webhook SyncPay] Corpo:', JSON.stringify(notification, null, 2));
 
-        // Passo 3: Usar os nomes de campos corretos (provavelmente 'identifier' e 'status').
-        const transactionId = notification.identifier; 
+        const transactionId = notification.identifier;
         const status = notification.status;
         const customer = notification.payer;
 
         if (!transactionId || !status) {
-            console.log('[Webhook SyncPay] Webhook ignorado. "identifier" ou "status" não encontrados no corpo.');
+            console.log('[Webhook SyncPay] Ignorado: "identifier" ou "status" não encontrados.');
             return res.sendStatus(200);
         }
 
-        // Passo 4: Verificar se o status é de pagamento confirmado.
         if (String(status).toUpperCase() === 'PAID' || String(status).toUpperCase() === 'COMPLETED') {
             
-            console.log(`[Webhook SyncPay] Processando pagamento para transação: ${transactionId}`);
+            console.log(`[Webhook SyncPay] Processando pagamento para: ${transactionId}`);
             const [tx] = await sql`
                 SELECT * FROM pix_transactions 
                 WHERE provider_transaction_id = ${transactionId} AND provider = 'syncpay'
@@ -2294,21 +2243,19 @@ app.post('/api/webhook/syncpay', async (req, res) => {
 
             if (tx && tx.status !== 'paid') {
                 console.log(`[Webhook SyncPay] Transação ${tx.id} encontrada. Atualizando para PAGO.`);
-                // Chama a sua função principal para processar o pagamento bem-sucedido.
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document });
             } else if (tx) {
-                console.log(`[Webhook SyncPay] Transação ${tx.id} já estava como 'paga'. Nenhuma ação necessária.`);
+                console.log(`[Webhook SyncPay] Transação ${tx.id} já estava como 'paga'.`);
             } else {
-                console.warn(`[Webhook SyncPay] AVISO: Transação com ID ${transactionId} não foi encontrada no banco de dados.`);
+                console.warn(`[Webhook SyncPay] AVISO: Transação ${transactionId} não encontrada no banco.`);
             }
         }
         
-        // Passo 5: Responder à SyncPay para confirmar o recebimento.
         res.sendStatus(200);
     
     } catch (error) {
-        console.error("Erro CRÍTICO no webhook da SyncPay ao processar o corpo:", error);
-        res.sendStatus(500); // Informa à SyncPay que ocorreu um erro do seu lado.
+        console.error("Erro CRÍTICO no webhook da SyncPay:", error);
+        res.sendStatus(500);
     }
 });
 
