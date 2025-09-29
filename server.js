@@ -2217,25 +2217,32 @@ app.post('/api/manychat/lead', async (req, res) => {
 
 // ROTA FINAL E CORRIGIDA PARA WEBHOOK DA SYNCPAY
 app.post('/api/webhook/syncpay', async (req, res) => {
-    console.log('[Webhook SyncPay] Notificação recebida.');
-    
     try {
-        // req.body já é um objeto JSON porque o express.json() já o processou.
         const notification = req.body;
-        console.log('[Webhook SyncPay] Corpo:', JSON.stringify(notification, null, 2));
+        console.log('[Webhook SyncPay] Notificação recebida:', JSON.stringify(notification, null, 2));
 
-        const transactionId = notification.identifier;
-        const status = notification.status;
-        const customer = notification.payer;
-
-        if (!transactionId || !status) {
-            console.log('[Webhook SyncPay] Ignorado: "identifier" ou "status" não encontrados.');
+        // Verifica se o objeto principal 'data' existe
+        if (!notification.data) {
+            console.log('[Webhook SyncPay] Webhook ignorado: formato inesperado, objeto "data" não encontrado.');
             return res.sendStatus(200);
         }
 
-        if (String(status).toUpperCase() === 'PAID' || String(status).toUpperCase() === 'COMPLETED') {
+        // Extrai os dados de dentro do objeto 'data'
+        const transactionData = notification.data;
+        const transactionId = transactionData.id;
+        const status = transactionData.status;
+        const customer = transactionData.client;
+
+        if (!transactionId || !status) {
+            console.log('[Webhook SyncPay] Ignorado: "id" ou "status" não encontrados dentro do objeto "data".');
+            return res.sendStatus(200);
+        }
+
+        // Verifica se o status é de pagamento confirmado (agora com o valor correto 'completed')
+        if (String(status).toLowerCase() === 'completed') {
             
-            console.log(`[Webhook SyncPay] Processando pagamento para: ${transactionId}`);
+            console.log(`[Webhook SyncPay] Processando pagamento para transação: ${transactionId}`);
+            
             const [tx] = await sql`
                 SELECT * FROM pix_transactions 
                 WHERE provider_transaction_id = ${transactionId} AND provider = 'syncpay'
@@ -2247,7 +2254,7 @@ app.post('/api/webhook/syncpay', async (req, res) => {
             } else if (tx) {
                 console.log(`[Webhook SyncPay] Transação ${tx.id} já estava como 'paga'.`);
             } else {
-                console.warn(`[Webhook SyncPay] AVISO: Transação ${transactionId} não encontrada no banco.`);
+                console.warn(`[Webhook SyncPay] AVISO: Transação com ID ${transactionId} não foi encontrada no banco de dados.`);
             }
         }
         
