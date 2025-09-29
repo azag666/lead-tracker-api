@@ -2183,5 +2183,50 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
+// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT ---
+app.post('/api/manychat/lead', async (req, res) => {
+    const apiKey = req.headers['x-api-key']; 
+    if (!apiKey) {
+        return res.status(401).send('API Key não fornecida.');
+    }
 
+    const { bot_name, chat_id, first_name, last_name, username } = req.body;
+
+    if (!bot_name || !chat_id) {
+        return res.status(400).json({ message: 'Os campos bot_name e chat_id são obrigatórios.' });
+    }
+
+    try {
+        const [seller] = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        if (seller.length === 0) {
+            return res.status(403).json({ message: 'API Key inválida.' });
+        }
+        const sellerId = seller.id;
+        
+        const [bot] = await sql`SELECT id FROM telegram_bots WHERE bot_name = ${bot_name} AND seller_id = ${sellerId}`;
+        if (bot.length === 0) {
+            return res.status(404).json({ message: `Bot com o nome '${bot_name}' não foi encontrado para este vendedor.` });
+        }
+        const botId = bot.id;
+
+        // Salva ou atualiza os dados do lead no banco de dados.
+        await sql`
+            INSERT INTO telegram_chats 
+                (seller_id, bot_id, chat_id, first_name, last_name, username, sender_type, message_text)
+            VALUES 
+                (${sellerId}, ${botId}, ${chat_id}, ${first_name || 'Lead'}, ${last_name || ''}, ${username || null}, 'user', 'Lead capturado via ManyChat')
+            ON CONFLICT (chat_id, bot_id) DO UPDATE SET -- Evita duplicados e atualiza dados
+                first_name = EXCLUDED.first_name,
+                last_name = EXCLUDED.last_name,
+                username = EXCLUDED.username,
+                updated_at = NOW();
+        `;
+
+        res.status(200).json({ message: 'Lead salvo com sucesso!' });
+
+    } catch (error) {
+        console.error("Erro ao salvar lead do ManyChat:", error);
+        res.status(500).json({ message: 'Erro interno no servidor ao processar o lead.' });
+    }
+});
 module.exports = app;
