@@ -2283,5 +2283,3 @@ app.post('/api/webhook/syncpay', async (req, res) => {
 
 
 module.exports = app;
-
-}
