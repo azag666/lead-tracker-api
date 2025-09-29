@@ -2183,14 +2183,15 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
-// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT (VERSÃO FINAL E CORRIGIDA) ---
+// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT (VERSÃO FINAL COM CLICK_ID) ---
 app.post('/api/manychat/lead', async (req, res) => {
     const apiKey = req.headers['x-api-key']; 
     if (!apiKey) {
         return res.status(401).send('API Key não fornecida.');
     }
 
-    const { bot_name, chat_id, first_name, last_name, username } = req.body;
+    // Adiciona o click_id à desestruturação do corpo da requisição
+    const { bot_name, chat_id, first_name, last_name, username, click_id } = req.body;
 
     if (!bot_name || !chat_id) {
         return res.status(400).json({ message: 'Os campos bot_name e chat_id são obrigatórios.' });
@@ -2209,30 +2210,33 @@ app.post('/api/manychat/lead', async (req, res) => {
         }
         const botId = botResult[0].id;
 
-        // Passo 1: Verifica se o lead (usuário do chat) já existe
+        // Formata o click_id para o padrão do banco de dados, se ele for recebido
+        const db_click_id = click_id ? (click_id.startsWith('/start ') ? click_id : `/start ${click_id}`) : null;
+
         const existingLead = await sql`
             SELECT id FROM telegram_chats 
-            WHERE chat_id = ${chat_id} AND bot_id = ${botId} AND message_text = 'Lead capturado via ManyChat'
+            WHERE chat_id = ${chat_id} AND bot_id = ${botId}
             LIMIT 1;
         `;
 
         if (existingLead.length > 0) {
-            // Passo 2a: Se existe, atualiza os dados
+            // Se existe, atualiza os dados, incluindo o click_id
             await sql`
                 UPDATE telegram_chats 
                 SET 
                     first_name = ${first_name || 'Lead'}, 
                     last_name = ${last_name || ''}, 
-                    username = ${username || null}
+                    username = ${username || null},
+                    click_id = ${db_click_id} -- Adiciona a atualização do click_id
                 WHERE id = ${existingLead[0].id};
             `;
         } else {
-            // Passo 2b: Se não existe, insere um novo registro
+            // Se não existe, insere um novo registro com o click_id
             await sql`
                 INSERT INTO telegram_chats 
-                    (seller_id, bot_id, chat_id, first_name, last_name, username, sender_type, message_text)
+                    (seller_id, bot_id, chat_id, first_name, last_name, username, click_id, sender_type, message_text)
                 VALUES 
-                    (${sellerId}, ${botId}, ${chat_id}, ${first_name || 'Lead'}, ${last_name || ''}, ${username || null}, 'user', 'Lead capturado via ManyChat');
+                    (${sellerId}, ${botId}, ${chat_id}, ${first_name || 'Lead'}, ${last_name || ''}, ${username || null}, ${db_click_id}, 'user', 'Lead capturado via ManyChat');
             `;
         }
 
