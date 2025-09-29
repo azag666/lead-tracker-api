@@ -1,4 +1,4 @@
-// VERSÃO FINAL E COMPLETA - PRONTA PARA PRODUÇÃO
+// VERSÃO FINAL E CORRIGIDA - PRONTA PARA PRODUÇÃO
 const express = require('express');
 const cors = require('cors');
 const { neon } = require('@neondatabase/serverless');
@@ -470,7 +470,7 @@ app.get('/api/admin/transactions', authenticateAdmin, async (req, res) => {
         const limit = parseInt(req.query.limit || 20);
         const offset = (page - 1) * limit;
         const transactions = await sql`
-            SELECT pt.id, pt.status, pt.pix_value, pt.provider, pt.created_at, s.name as seller_name, s.email as seller_email
+            SELECT pt.id, pt.status, pt.pix_value, pt.provider, pt.created_at, pt.paid_at, s.name as seller_name, s.email as seller_email
             FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
             JOIN sellers s ON c.seller_id = s.id ORDER BY pt.created_at DESC
             LIMIT ${limit} OFFSET ${offset};`;
@@ -565,12 +565,15 @@ app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
         const sellerId = req.user.id;
         const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
+        
+        // CORREÇÃO: Apenas busca pressels que não estão marcadas como deletadas
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
             FROM pressels p
             LEFT JOIN ( SELECT pressel_id, array_agg(pixel_config_id) as pixel_ids FROM pressel_pixels GROUP BY pressel_id ) px ON p.id = px.pressel_id
             JOIN telegram_bots b ON p.bot_id = b.id
-            WHERE p.seller_id = ${sellerId} ORDER BY p.created_at DESC`;
+            WHERE p.seller_id = ${sellerId} AND p.is_deleted = FALSE ORDER BY p.created_at DESC`;
+
         const botsPromise = sql`SELECT * FROM telegram_bots WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const checkoutsPromise = sql`
             SELECT c.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids
@@ -854,15 +857,27 @@ app.post('/api/pressels', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao salvar a pressel.' });
     }
 });
+
+// CORREÇÃO DEFINITIVA: Implementa "Soft Delete" em vez de apagar permanentemente.
 app.delete('/api/pressels/:id', authenticateJwt, async (req, res) => {
     try {
-        await sql`DELETE FROM pressels WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
-        res.status(204).send();
+        // Em vez de DELETE, fazemos um UPDATE para marcar como deletado
+        const result = await sql`
+            UPDATE pressels 
+            SET is_deleted = TRUE, updated_at = NOW() 
+            WHERE id = ${req.params.id} AND seller_id = ${req.user.id}`;
+        
+        if (result.count === 0) {
+            return res.status(404).json({ message: "Pressel não encontrada ou não pertence a este usuário." });
+        }
+        
+        res.status(204).send(); // 204 No Content é o padrão para exclusões bem-sucedidas
     } catch (error) {
-        console.error("Erro ao excluir pressel:", error);
+        console.error("Erro ao fazer soft-delete da pressel:", error);
         res.status(500).json({ message: 'Erro ao excluir a pressel.' });
     }
 });
+
 app.post('/api/checkouts', authenticateJwt, async (req, res) => {
     const { name, product_name, redirect_url, value_type, fixed_value_cents, pixel_ids } = req.body;
 
@@ -1088,8 +1103,8 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             : sql`SELECT COUNT(pt.id) AS total, COALESCE(SUM(pt.pix_value), 0) AS revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid'`;
 
         const botsPerformanceQuery = hasDateFilter
-            ? sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
-            : sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
+            ? sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id AND p.is_deleted = FALSE LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} AND c.created_at BETWEEN ${startDate} AND ${endDate} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`
+            : sql`SELECT tb.bot_name, COUNT(c.id) AS total_clicks, COUNT(pt.id) FILTER (WHERE pt.status = 'paid') AS total_pix_paid, COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS paid_revenue FROM telegram_bots tb LEFT JOIN pressels p ON p.bot_id = tb.id AND p.is_deleted = FALSE LEFT JOIN clicks c ON c.pressel_id = p.id AND c.seller_id = ${sellerId} LEFT JOIN pix_transactions pt ON pt.click_id_internal = c.id WHERE tb.seller_id = ${sellerId} GROUP BY tb.bot_name ORDER BY paid_revenue DESC, total_clicks DESC`;
 
         const clicksByStateQuery = hasDateFilter
              ? sql`SELECT c.state, COUNT(c.id) AS total_clicks FROM clicks c WHERE c.seller_id = ${sellerId} AND c.state IS NOT NULL AND c.state != 'Desconhecido' AND c.created_at BETWEEN ${startDate} AND ${endDate} GROUP BY c.state ORDER BY total_clicks DESC LIMIT 10`
@@ -2268,3 +2283,5 @@ app.post('/api/webhook/syncpay', async (req, res) => {
 
 
 module.exports = app;
+
+}
