@@ -2183,7 +2183,7 @@ app.delete('/api/chats/:botId/:chatId', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao deletar a conversa.' });
     }
 });
-// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT ---
+// --- ROTA PARA CAPTURA DE LEADS DO MANYCHAT (VERSÃO CORRIGIDA) ---
 app.post('/api/manychat/lead', async (req, res) => {
     const apiKey = req.headers['x-api-key']; 
     if (!apiKey) {
@@ -2218,8 +2218,7 @@ app.post('/api/manychat/lead', async (req, res) => {
             ON CONFLICT (chat_id, bot_id) DO UPDATE SET -- Evita duplicados e atualiza dados
                 first_name = EXCLUDED.first_name,
                 last_name = EXCLUDED.last_name,
-                username = EXCLUDED.username,
-                updated_at = NOW();
+                username = EXCLUDED.username;
         `;
 
         res.status(200).json({ message: 'Lead salvo com sucesso!' });
