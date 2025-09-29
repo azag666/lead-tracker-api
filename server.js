@@ -2300,55 +2300,49 @@ app.post('/api/webhook/syncpay', async (req, res) => {
     }
 
 });
-/ ROTA DEFINITIVA PARA WEBHOOK DA SYNCPAY
-// Esta rota primeiro captura o corpo da requisição como texto para garantir o log.
-app.use('/api/webhook/syncpay', express.text({ type: '*/*' }));
-
+// Adicione esta nova rota no seu server.js
 app.post('/api/webhook/syncpay', async (req, res) => {
-    // Passo 1: Registar o corpo exato que a SyncPay enviou.
-    console.log('[Webhook SyncPay] Notificação recebida. Corpo (RAW):', req.body);
+    console.log('[Webhook SyncPay] Notificação recebida:', JSON.stringify(req.body, null, 2));
 
     try {
-        // Passo 2: Tentar converter o texto para JSON para poder ser processado.
-        const notification = JSON.parse(req.body);
+        // --- ATENÇÃO: Verifique nos seus logs se os nomes dos campos abaixo estão corretos ---
+        // A SyncPay pode usar 'identifier' em vez de 'transactionId'.
+        // O status pode ser 'PAID', 'paid', 'COMPLETED', etc.
 
-        // Passo 3: Usar os nomes de campos corretos (provavelmente 'identifier' e 'status').
-        const transactionId = notification.identifier; 
-        const status = notification.status;
-        const customer = notification.payer;
+        const transactionId = req.body.identifier || req.body.transactionId; // Use o campo correto que vier no log
+        const status = req.body.status;
+        const customer = req.body.payer || req.body.customer; // Use o campo correto que vier no log
 
         if (!transactionId || !status) {
-            console.log('[Webhook SyncPay] Webhook ignorado. "identifier" ou "status" não encontrados no corpo.');
+            console.log('[Webhook SyncPay] Webhook ignorado por falta de dados essenciais.');
             return res.sendStatus(200);
         }
 
-        // Passo 4: Verificar se o status é de pagamento confirmado.
+        // --- AJUSTE AQUI para o valor exato que você descobrir nos logs ---
         if (status.toUpperCase() === 'PAID' || status.toUpperCase() === 'COMPLETED') {
             
             console.log(`[Webhook SyncPay] Processando pagamento para transação: ${transactionId}`);
+
             const [tx] = await sql`
                 SELECT * FROM pix_transactions 
                 WHERE provider_transaction_id = ${transactionId} AND provider = 'syncpay'
             `;
 
             if (tx && tx.status !== 'paid') {
-                console.log(`[Webhook SyncPay] Transação ${tx.id} encontrada. Atualizando para PAGO.`);
-                // Chama a sua função principal para processar o pagamento bem-sucedido.
+                console.log(`[Webhook SyncPay] Transação ${tx.id} encontrada e pendente. Atualizando para PAGO.`);
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document });
             } else if (tx) {
-                console.log(`[Webhook SyncPay] Transação ${tx.id} já estava como 'paga'. Nenhuma ação necessária.`);
+                console.log(`[Webhook SyncPay] Transação ${tx.id} já estava como PAGA.`);
             } else {
-                console.warn(`[Webhook SyncPay] AVISO: Transação com ID ${transactionId} não foi encontrada no banco de dados.`);
+                console.warn(`[Webhook SyncPay] Transação com ID ${transactionId} não encontrada no banco.`);
             }
         }
         
-        // Passo 5: Responder à SyncPay para confirmar o recebimento.
-        res.sendStatus(200);
+        res.sendStatus(200); // Responda para a SyncPay que você recebeu o webhook com sucesso.
     
     } catch (error) {
         console.error("Erro CRÍTICO no webhook da SyncPay:", error);
-        res.sendStatus(500); // Informa à SyncPay que ocorreu um erro do seu lado.
+        res.sendStatus(500); // Em caso de erro, informe que algo deu errado.
     }
 });
-
 module.exports = app;
