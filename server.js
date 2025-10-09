@@ -116,6 +116,7 @@ async function getSyncPayAuthToken(seller) {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
     let pixData;
     let acquirer = 'Não identificado';
+    const commission_rate = seller.commission_rate || 0.0299; // Usa a comissão do usuário ou o padrão
     const clientPayload = {
         document: {
             number: "12345678901",
@@ -139,7 +140,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
                 expiresInDays: 1
             },
         };
-        const commission_cents = Math.floor(value_cents * 0.0299);
+        const commission_cents = Math.floor(value_cents * commission_rate);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && BRPIX_SPLIT_RECIPIENT_ID) {
             payload.split = [{
                 recipientId: BRPIX_SPLIT_RECIPIENT_ID,
@@ -168,7 +169,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             payer: { name: "Cliente Padrão", email: "gabriel@gmail.com", document: "21376710773", phone: "27995310379" },
             callbackUrl: `https://${host}/api/webhook/syncpay`
         };
-        const commission_percentage = 2.99;
+        const commission_percentage = commission_rate * 100;
         if (apiKey !== ADMIN_API_KEY && process.env.SYNCPAY_SPLIT_ACCOUNT_ID) {
             payload.split = [{
                 percentage: Math.round(commission_percentage), 
@@ -200,7 +201,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             client: { name: "Cliente Padrão", email: "gabriel@gmail.com", document: "21376710773", phone: "27995310379" },
             callbackUrl: `https://${host}/api/webhook/${provider}`
         };
-        const commission = parseFloat(((value_cents / 100) * 0.0299).toFixed(2));
+        const commission = parseFloat(((value_cents / 100) * commission_rate).toFixed(2));
         if (apiKey !== ADMIN_API_KEY && commission > 0 && splitId) {
             payload.splits = [{ producerId: splitId, amount: commission }];
         }
@@ -214,7 +215,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             value: value_cents,
             webhook_url: `https://${host}/api/webhook/pushinpay`,
         };
-        const commission_cents = Math.floor(value_cents * 0.0299);
+        const commission_cents = Math.floor(value_cents * commission_rate);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && PUSHINPAY_SPLIT_ACCOUNT_ID) {
             payload.split_rules = [{ value: commission_cents, account_id: PUSHINPAY_SPLIT_ACCOUNT_ID }];
         }
@@ -529,6 +530,23 @@ app.get('/api/admin/usage-analysis', authenticateAdmin, async (req, res) => {
     }
 });
 
+app.put('/api/admin/sellers/:id/commission', authenticateAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { commission_rate } = req.body;
+
+    if (typeof commission_rate !== 'number' || commission_rate < 0 || commission_rate > 1) {
+        return res.status(400).json({ message: 'A taxa de comissão deve ser um número entre 0 e 1 (ex: 0.0299 para 2.99%).' });
+    }
+
+    try {
+        await sql`UPDATE sellers SET commission_rate = ${commission_rate} WHERE id = ${id};`;
+        res.status(200).json({ message: 'Comissão do usuário atualizada com sucesso.' });
+    } catch (error) {
+        console.error("Erro ao atualizar comissão:", error);
+        res.status(500).json({ message: 'Erro ao atualizar a comissão.' });
+    }
+});
+
 // --- ROTAS GERAIS DE USUÁRIO ---
 app.post('/api/sellers/register', async (req, res) => {
     const { name, email, password } = req.body;
@@ -590,7 +608,7 @@ app.post('/api/sellers/login', async (req, res) => {
 app.get('/api/dashboard/data', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, brpix_secret_key, brpix_company_id, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary FROM sellers WHERE id = ${sellerId}`;
+        const settingsPromise = sql`SELECT api_key, pushinpay_token, cnpay_public_key, cnpay_secret_key, oasyfy_public_key, oasyfy_secret_key, syncpay_client_id, syncpay_client_secret, brpix_secret_key, brpix_company_id, pix_provider_primary, pix_provider_secondary, pix_provider_tertiary, commission_rate FROM sellers WHERE id = ${sellerId}`;
         const pixelsPromise = sql`SELECT * FROM pixel_configurations WHERE seller_id = ${sellerId} ORDER BY created_at DESC`;
         const presselsPromise = sql`
             SELECT p.*, COALESCE(px.pixel_ids, ARRAY[]::integer[]) as pixel_ids, b.bot_name
@@ -693,8 +711,6 @@ app.delete('/api/pixels/:id', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao excluir o pixel.' });
     }
 });
-
-// --- ROTAS DE GERENCIAMENTO DE BOTS (COM ADIÇÕES) ---
 
 app.post('/api/bots', authenticateJwt, async (req, res) => {
     const { bot_name } = req.body;
@@ -1099,9 +1115,6 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         let { startDate, endDate } = req.query;
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        if (hasDateFilter) {
-        }
-
         const totalClicksQuery = hasDateFilter
             ? sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate}`
             : sql`SELECT COUNT(*) FROM clicks WHERE seller_id = ${sellerId}`;
@@ -1127,25 +1140,12 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
              ? sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' AND pt.paid_at BETWEEN ${startDate} AND ${endDate} GROUP BY 1 ORDER BY 1 ASC`
              : sql`SELECT DATE(pt.paid_at AT TIME ZONE ${userTimezone}) as date, COALESCE(SUM(pt.pix_value), 0) as revenue FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id WHERE c.seller_id = ${sellerId} AND pt.status = 'paid' GROUP BY 1 ORDER BY 1 ASC`;
         
-        const trafficSourceQuery = hasDateFilter
-            ? sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY source ORDER BY clicks DESC`
-            : sql`SELECT CASE WHEN utm_source = 'FB' THEN 'Facebook' WHEN utm_source = 'ig' THEN 'Instagram' ELSE 'Outros' END as source, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY source ORDER BY clicks DESC`;
-
-        const topPlacementsQuery = hasDateFilter
-            ? sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY placement ORDER BY clicks DESC LIMIT 10`
-            : sql`SELECT utm_term as placement, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND utm_term IS NOT NULL GROUP BY placement ORDER BY clicks DESC LIMIT 10`;
-        
-        const deviceOSQuery = hasDateFilter
-            ? sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} AND created_at BETWEEN ${startDate} AND ${endDate} GROUP BY os ORDER BY clicks DESC`
-            : sql`SELECT CASE WHEN user_agent ILIKE '%Android%' THEN 'Android' WHEN user_agent ILIKE '%iPhone%' OR user_agent ILIKE '%iPad%' THEN 'iOS' ELSE 'Outros' END as os, COUNT(id) as clicks FROM clicks WHERE seller_id = ${sellerId} GROUP BY os ORDER BY clicks DESC`;
-
         const [
                totalClicksResult, pixGeneratedResult, pixPaidResult, botsPerformance,
-               clicksByState, dailyRevenue, trafficSource, topPlacements, deviceOS
+               clicksByState, dailyRevenue
         ] = await Promise.all([
               totalClicksQuery, pixGeneratedQuery, pixPaidQuery, botsPerformanceQuery,
-              clicksByStateQuery, dailyRevenueQuery, trafficSourceQuery, topPlacementsQuery,
-              deviceOSQuery
+              clicksByStateQuery, dailyRevenueQuery
         ]);
 
         const totalClicks = totalClicksResult[0].count;
@@ -1162,10 +1162,7 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
             paid_revenue: parseFloat(paidRevenue),
             bots_performance: botsPerformance.map(b => ({ ...b, total_clicks: parseInt(b.total_clicks), total_pix_paid: parseInt(b.total_pix_paid), paid_revenue: parseFloat(b.paid_revenue) })),
             clicks_by_state: clicksByState.map(s => ({ ...s, total_clicks: parseInt(s.total_clicks) })),
-            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) })),
-            traffic_source: trafficSource.map(s => ({ ...s, clicks: parseInt(s.clicks) })),
-            top_placements: topPlacements.map(p => ({ ...p, clicks: parseInt(p.clicks) })),
-            device_os: deviceOS.map(d => ({ ...d, clicks: parseInt(d.clicks) }))
+            daily_revenue: dailyRevenue.map(d => ({ date: d.date.toISOString().split('T')[0], revenue: parseFloat(d.revenue) }))
         });
     } catch (error) {
         console.error("Erro ao buscar métricas do dashboard:", error);
@@ -1313,7 +1310,8 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
         
-        const value_cents = 50;
+        const value_cents = 3333; // Valor de teste alterado para R$ 33,33
+        
         const startTime = Date.now();
         const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
         const endTime = Date.now();
@@ -1352,7 +1350,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
             return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
         }
 
-        const value_cents = 50;
+        const value_cents = 3333;
 
         for (const providerInfo of providerOrder) {
             const provider = providerInfo.name;
@@ -1824,7 +1822,7 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
             customer: { name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com", phone: customerData?.phone || null, document: customerData?.document || null, },
             products: [{ id: productData?.id || "default_product", name: productData?.name || "Produto Digital", planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100) }],
             trackingParameters: { src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign, utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term },
-            commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * 0.0299), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - 0.0299)) },
+            commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * (sellerData.commission_rate || 0.0299)), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - (sellerData.commission_rate || 0.0299))) },
             isTest: false
         };
 
@@ -1924,7 +1922,7 @@ async function checkPendingTransactions() {
         if (pendingTransactions.length === 0) return;
         
         for (const tx of pendingTransactions) {
-            if (tx.provider === 'oasyfy' || tx.provider === 'cnpay') {
+            if (tx.provider === 'oasyfy' || tx.provider === 'cnpay' || tx.provider === 'brpix') {
                 continue;
             }
 
@@ -1962,7 +1960,6 @@ async function checkPendingTransactions() {
     }
 }
 
-// ROTA FINAL E CORRIGIDA PARA WEBHOOK DA SYNCPAY
 app.post('/api/webhook/syncpay', async (req, res) => {
     try {
         const notification = req.body;
