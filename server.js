@@ -118,8 +118,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     let acquirer = 'Não identificado';
     const commission_rate = seller.commission_rate || 0.0299; // Usa a comissão do usuário ou o padrão
     
-    // **CORREÇÃO APLICADA AQUI**
-    // Cliente padrão unificado para todos os provedores, usando os dados que já funcionam.
+    // Cliente padrão unificado para todos os provedores
     const clientPayload = {
         document: {
             number: "21376710773",
@@ -135,14 +134,32 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
             throw new Error('Credenciais da BR PIX não configuradas para este vendedor.');
         }
         const credentials = Buffer.from(`${seller.brpix_secret_key}:${seller.brpix_company_id}`).toString('base64');
+        
+        // **CORREÇÃO APLICADA AQUI**
+        // Adicionado o campo 'items' obrigatório e o campo 'shipping'
         const payload = {
-            customer: clientPayload, // Usando o cliente padrão corrigido
+            customer: clientPayload,
+            shipping: { // Adicionado para maior compatibilidade
+                street: "Rua Exemplo",
+                streetNumber: "123",
+                zipCode: "12345678",
+                neighborhood: "Bairro Exemplo",
+                city: "Cidade Exemplo",
+                state: "SP",
+                country: "BR"
+            },
+            items: [{ // Campo obrigatório adicionado
+                title: "Produto Digital",
+                unitPrice: value_cents,
+                quantity: 1
+            }],
             paymentMethod: "PIX",
             amount: value_cents,
             pix: {
                 expiresInDays: 1
             },
         };
+
         const commission_cents = Math.floor(value_cents * commission_rate);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && BRPIX_SPLIT_RECIPIENT_ID) {
             payload.split = [{
