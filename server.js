@@ -131,12 +131,9 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         }
         const credentials = Buffer.from(`${seller.brpix_secret_key}:${seller.brpix_company_id}`).toString('base64');
         
+        // **CORREÇÃO APLICADA AQUI**: Objeto 'shipping' removido
         const payload = {
             customer: clientPayload,
-            shipping: {
-                street: "Rua Exemplo", streetNumber: "123", zipCode: "12345678",
-                neighborhood: "Bairro Exemplo", city: "Cidade Exemplo", state: "SP", country: "BR"
-            },
             items: [{ title: "Produto Digital", unitPrice: value_cents, quantity: 1 }],
             paymentMethod: "PIX",
             amount: value_cents,
@@ -1225,7 +1222,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
                 
                 return res.status(200).json(pixResult);
             } catch (error) {
-                console.error(`[PIX GENERATE FALLBACK] Falha ao gerar PIX com ${provider}:`, error.message);
+                console.error(`[PIX GENERATE FALLBACK] Falha ao gerar PIX com ${provider}:`, error.response?.data || error.message);
                 lastError = error;
             }
         }
