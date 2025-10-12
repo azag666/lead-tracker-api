@@ -117,14 +117,17 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
     let pixData;
     let acquirer = 'Não identificado';
     const commission_rate = seller.commission_rate || 0.0299; // Usa a comissão do usuário ou o padrão
+    
+    // **CORREÇÃO APLICADA AQUI**
+    // Cliente padrão unificado para todos os provedores, usando os dados que já funcionam.
     const clientPayload = {
         document: {
-            number: "12345678901",
+            number: "21376710773",
             type: "CPF"
         },
-        name: "Cliente Final",
-        email: "cliente@email.com",
-        phone: "11999999999"
+        name: "Cliente Padrão",
+        email: "gabriel@email.com",
+        phone: "27995310379"
     };
     
     if (provider === 'brpix') {
@@ -133,7 +136,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         }
         const credentials = Buffer.from(`${seller.brpix_secret_key}:${seller.brpix_company_id}`).toString('base64');
         const payload = {
-            customer: clientPayload,
+            customer: clientPayload, // Usando o cliente padrão corrigido
             paymentMethod: "PIX",
             amount: value_cents,
             pix: {
