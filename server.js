@@ -133,9 +133,9 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         
         const payload = {
             customer: clientPayload,
-            items: [{ title: "Produto Digital", unitPrice: value_cents, quantity: 1 }],
+            items: [{ title: "Produto Digital", unitPrice: parseInt(value_cents, 10), quantity: 1 }],
             paymentMethod: "PIX",
-            amount: value_cents,
+            amount: parseInt(value_cents, 10),
             pix: { expiresInDays: 1 },
             ip: ip_address
         };
@@ -1297,7 +1297,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sellerId = req.user.id;
     const { provider } = req.body;
-    const ip_address = "1.1.1.1"; // IP de teste genérico
+    const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
 
     if (!provider) {
         return res.status(400).json({ message: 'O nome do provedor é obrigatório.' });
@@ -1325,13 +1325,13 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         console.error(`[PIX TEST ERROR] Seller ID: ${sellerId}, Provider: ${provider} - Erro:`, error.response?.data || error.message);
         res.status(500).json({ 
             message: `Falha ao gerar PIX de teste com ${provider.toUpperCase()}. Verifique as credenciais.`, 
-            details: error.response?.data?.message || error.message 
+            details: error.response?.data ? JSON.stringify(error.response.data) : error.message 
         });
     }
 });
 app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     const sellerId = req.user.id;
-    const ip_address = "1.1.1.1"; // IP de teste genérico
+    const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
     let testLog = [];
 
     try {
@@ -1368,8 +1368,11 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
                 });
 
             } catch (error) {
-                const errorMessage = error.response?.data?.details || error.message;
-                console.error(`Falha no provedor ${position} (${provider}):`, errorMessage);
+                let errorMessage = error.message;
+                if (error.response && error.response.data) {
+                    errorMessage = JSON.stringify(error.response.data);
+                }
+                console.error(`Falha no provedor ${position} (${provider}):`, error.response?.data || error.message);
                 testLog.push(`FALHA com Provedor ${position} (${provider.toUpperCase()}): ${errorMessage}`);
             }
         }
