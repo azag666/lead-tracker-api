@@ -113,17 +113,13 @@ async function getSyncPayAuthToken(seller) {
     return access_token;
 }
 
-async function generatePixForProvider(provider, seller, value_cents, host, apiKey) {
+async function generatePixForProvider(provider, seller, value_cents, host, apiKey, ip_address) {
     let pixData;
     let acquirer = 'Não identificado';
-    const commission_rate = seller.commission_rate || 0.0299; // Usa a comissão do usuário ou o padrão
+    const commission_rate = seller.commission_rate || 0.0299;
     
-    // Cliente padrão unificado para todos os provedores
     const clientPayload = {
-        document: {
-            number: "21376710773",
-            type: "CPF"
-        },
+        document: { number: "21376710773", type: "CPF" },
         name: "Cliente Padrão",
         email: "gabriel@email.com",
         phone: "27995310379"
@@ -135,43 +131,25 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         }
         const credentials = Buffer.from(`${seller.brpix_secret_key}:${seller.brpix_company_id}`).toString('base64');
         
-        // **CORREÇÃO APLICADA AQUI**
-        // Adicionado o campo 'items' obrigatório e o campo 'shipping'
         const payload = {
             customer: clientPayload,
-            shipping: { // Adicionado para maior compatibilidade
-                street: "Rua Exemplo",
-                streetNumber: "123",
-                zipCode: "12345678",
-                neighborhood: "Bairro Exemplo",
-                city: "Cidade Exemplo",
-                state: "SP",
-                country: "BR"
+            shipping: {
+                street: "Rua Exemplo", streetNumber: "123", zipCode: "12345678",
+                neighborhood: "Bairro Exemplo", city: "Cidade Exemplo", state: "SP", country: "BR"
             },
-            items: [{ // Campo obrigatório adicionado
-                title: "Produto Digital",
-                unitPrice: value_cents,
-                quantity: 1
-            }],
+            items: [{ title: "Produto Digital", unitPrice: value_cents, quantity: 1 }],
             paymentMethod: "PIX",
             amount: value_cents,
-            pix: {
-                expiresInDays: 1
-            },
+            pix: { expiresInDays: 1 },
+            ip: ip_address
         };
 
         const commission_cents = Math.floor(value_cents * commission_rate);
         if (apiKey !== ADMIN_API_KEY && commission_cents > 0 && BRPIX_SPLIT_RECIPIENT_ID) {
-            payload.split = [{
-                recipientId: BRPIX_SPLIT_RECIPIENT_ID,
-                amount: commission_cents
-            }];
+            payload.split = [{ recipientId: BRPIX_SPLIT_RECIPIENT_ID, amount: commission_cents }];
         }
         const response = await axios.post('https://api.brpixdigital.com/functions/v1/transactions', payload, {
-            headers: {
-                'Authorization': `Basic ${credentials}`,
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/json' }
         });
         pixData = response.data;
         acquirer = "BRPix";
@@ -1227,12 +1205,14 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         const [click] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller.id}`;
         if (!click) return res.status(404).json({ message: 'Click ID não encontrado.' });
         
+        const ip_address = click.ip_address;
+        
         const providerOrder = [ seller.pix_provider_primary, seller.pix_provider_secondary, seller.pix_provider_tertiary ].filter(Boolean);
         let lastError = null;
 
         for (const provider of providerOrder) {
             try {
-                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey);
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey, ip_address);
                 const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
                 if (click.pressel_id) {
@@ -1321,6 +1301,7 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sellerId = req.user.id;
     const { provider } = req.body;
+    const ip_address = "1.1.1.1"; // IP de teste genérico
 
     if (!provider) {
         return res.status(400).json({ message: 'O nome do provedor é obrigatório.' });
@@ -1330,10 +1311,10 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
         
-        const value_cents = 3333; // Valor de teste alterado para R$ 33,33
+        const value_cents = 3333;
         
         const startTime = Date.now();
-        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key, ip_address);
         const endTime = Date.now();
         const responseTime = ((endTime - startTime) / 1000).toFixed(2);
 
@@ -1354,6 +1335,7 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
 });
 app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
     const sellerId = req.user.id;
+    const ip_address = "1.1.1.1"; // IP de teste genérico
     let testLog = [];
 
     try {
@@ -1378,7 +1360,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
             
             try {
                 const startTime = Date.now();
-                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key);
+                const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key, ip_address);
                 const endTime = Date.now();
                 const responseTime = ((endTime - startTime) / 1000).toFixed(2);
 
@@ -1556,7 +1538,8 @@ async function processFlow(chatId, botId, botToken, sellerId, startNodeId = null
                     if (!click) throw new Error("Dados do clique não encontrados para gerar o PIX.");
 
                     const provider = seller.pix_provider_primary || 'pushinpay';
-                    const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key);
+                    const ip_address = click.ip_address;
+                    const pixResult = await generatePixForProvider(provider, seller, valueInCents, 'novaapi-one.vercel.app', seller.api_key, ip_address);
                     
                     await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${valueInCents / 100}, ${pixResult.qr_code_text}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})`;
                     
