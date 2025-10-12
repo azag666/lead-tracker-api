@@ -131,7 +131,6 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         }
         const credentials = Buffer.from(`${seller.brpix_secret_key}:${seller.brpix_company_id}`).toString('base64');
         
-        // **CORREÇÃO APLICADA AQUI**: Objeto 'shipping' removido
         const payload = {
             customer: clientPayload,
             items: [{ title: "Produto Digital", unitPrice: value_cents, quantity: 1 }],
