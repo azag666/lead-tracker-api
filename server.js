@@ -150,8 +150,8 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         pixData = response.data;
         acquirer = "BRPix";
         return {
-            qr_code_text: pixData.pix.qrcodeText,
-            qr_code_base64: pixData.pix.qrcode,
+            qr_code_text: pixData.pix.qrcode, // Alterado de pixData.pix.qrcodeText
+            qr_code_base64: pixData.pix.qrcode, // Mantido para consistência com a resposta atual
             transaction_id: pixData.id,
             acquirer,
             provider
