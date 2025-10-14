@@ -2009,6 +2009,31 @@ app.post('/api/webhook/syncpay', async (req, res) => {
     }
 });
 
+app.post('/api/webhook/brpix', async (req, res) => {
+    const { event, data } = req.body;
+    console.log('[Webhook BRPix] Notificação recebida:', JSON.stringify(req.body, null, 2));
+
+    if (event === 'transaction.updated' && data?.status === 'paid') {
+        const transactionId = data.id;
+        const customer = data.customer;
+
+        try {
+            const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'brpix'`;
+
+            if (tx && tx.status !== 'paid') {
+                console.log(`[Webhook BRPix] Transação ${tx.id} encontrada. Atualizando para PAGO.`);
+                await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document?.number });
+            } else if (tx) {
+                console.log(`[Webhook BRPix] Transação ${tx.id} já estava como 'paga'.`);
+            } else {
+                 console.warn(`[Webhook BRPix] AVISO: Transação com ID ${transactionId} não foi encontrada no banco de dados.`);
+            }
+        } catch (error) {
+            console.error("Erro CRÍTICO no webhook da BRPix:", error);
+        }
+    }
+
+    res.sendStatus(200);
 });
 
 module.exports = app;
