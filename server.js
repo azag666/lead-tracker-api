@@ -2010,21 +2010,27 @@ app.post('/api/webhook/syncpay', async (req, res) => {
 });
 
 app.post('/api/webhook/brpix', async (req, res) => {
-    const { event, data } = req.body;
+    // 1. Extrai os campos corretos ('type' e 'data') do corpo da requisição.
+    const { type, data } = req.body; 
     console.log('[Webhook BRPix] Notificação recebida:', JSON.stringify(req.body, null, 2));
 
-    if (event === 'transaction.updated' && data?.status === 'paid') {
+    // 2. A condição de verificação é a mais importante.
+    //    Ela agora checa se o TIPO da notificação é 'transaction' e se o STATUS dentro dos dados é 'paid'.
+    if (type === 'transaction' && data?.status === 'paid') {
         const transactionId = data.id;
         const customer = data.customer;
 
         try {
+            // 3. Busca a transação no seu banco de dados para garantir que ela existe.
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'brpix'`;
 
+            // 4. Medida de segurança: Atualiza o status APENAS se a transação for encontrada
+            //    e se o status dela ainda NÃO for 'paid', evitando processamento duplicado.
             if (tx && tx.status !== 'paid') {
                 console.log(`[Webhook BRPix] Transação ${tx.id} encontrada. Atualizando para PAGO.`);
-                await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document?.number });
+                await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document });
             } else if (tx) {
-                console.log(`[Webhook BRPix] Transação ${tx.id} já estava como 'paga'.`);
+                console.log(`[Webhook BRPix] Transação ${tx.id} já estava como 'paga'. Nenhuma ação necessária.`);
             } else {
                  console.warn(`[Webhook BRPix] AVISO: Transação com ID ${transactionId} não foi encontrada no banco de dados.`);
             }
@@ -2033,6 +2039,7 @@ app.post('/api/webhook/brpix', async (req, res) => {
         }
     }
 
+    // Responde à BRPix com status 200 para confirmar o recebimento.
     res.sendStatus(200);
 });
 
