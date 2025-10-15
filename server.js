@@ -1192,14 +1192,19 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
             SELECT 
                 pt.status, 
                 pt.pix_value, 
-                COALESCE(tb.bot_name, ch.name, 'Checkout Hospedado') as source_name, 
+                -- Adiciona hc.config->>'product_name' no COALESCE para buscar o nome do produto
+                COALESCE(tb.bot_name, ch.name, hc.config->>'product_name', 'Checkout Hospedado') as source_name, 
                 pt.provider, 
                 pt.created_at
             FROM pix_transactions pt 
             JOIN clicks c ON pt.click_id_internal = c.id
             LEFT JOIN pressels p ON c.pressel_id = p.id 
             LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
+            -- JOIN padrão para checkouts antigos (numéricos)
             LEFT JOIN checkouts ch ON c.checkout_id ~ '^[0-9]+$' AND c.checkout_id::integer = ch.id 
+            -- NOVO JOIN: Associa o clique ao Checkout Hospedado quando o ID for do tipo 'cko_...'
+            LEFT JOIN hosted_checkouts hc ON c.checkout_id LIKE 'cko_%' AND c.checkout_id = hc.id
+            -- FIM DO NOVO JOIN
             WHERE c.seller_id = ${sellerId}
             ORDER BY pt.created_at DESC;`;
         res.status(200).json(transactions);
