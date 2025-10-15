@@ -1183,14 +1183,24 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 });
+
+// ########## ROTA DE TRANSAÇÕES CORRIGIDA ##########
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
         const transactions = await sql`
-            SELECT pt.status, pt.pix_value, COALESCE(tb.bot_name, ch.name, 'Checkout') as source_name, pt.provider, pt.created_at
-            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
-            LEFT JOIN pressels p ON c.pressel_id = p.id LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
-            LEFT JOIN checkouts ch ON c.checkout_id = ch.id WHERE c.seller_id = ${sellerId}
+            SELECT 
+                pt.status, 
+                pt.pix_value, 
+                COALESCE(tb.bot_name, ch.name, 'Checkout Hospedado') as source_name, 
+                pt.provider, 
+                pt.created_at
+            FROM pix_transactions pt 
+            JOIN clicks c ON pt.click_id_internal = c.id
+            LEFT JOIN pressels p ON c.pressel_id = p.id 
+            LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
+            LEFT JOIN checkouts ch ON c.checkout_id ~ '^[0-9]+$' AND c.checkout_id::integer = ch.id 
+            WHERE c.seller_id = ${sellerId}
             ORDER BY pt.created_at DESC;`;
         res.status(200).json(transactions);
     } catch (error) {
@@ -1198,6 +1208,8 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
         res.status(500).json({ message: 'Erro ao buscar dados das transações.' });
     }
 });
+// ########## FIM DA CORREÇÃO ##########
+
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
     const apiKey = req.headers['x-api-key'];
     const { click_id, value_cents, customer, product } = req.body;
