@@ -2084,5 +2084,25 @@ app.post('/api/checkouts/create-hosted', authenticateApiKey, async (req, res) =>
         res.status(500).json({ message: 'Erro interno ao criar o checkout.' });
     }
 });
+// Adicione esta rota ao seu server.js
+app.get('/api/oferta/:checkoutId', async (req, res) => {
+    const { checkoutId } = req.params;
+
+    try {
+        const [checkout] = await sql`
+            SELECT config FROM hosted_checkouts WHERE id = ${checkoutId}
+        `;
+
+        if (!checkout) {
+            return res.status(404).json({ message: 'Checkout não encontrado.' });
+        }
+        
+        res.status(200).json(checkout);
+
+    } catch (error) {
+        console.error("Erro ao buscar dados do checkout hospedado:", error);
+        res.status(500).json({ message: 'Erro interno no servidor.' });
+    }
+});
 
 module.exports = app;
