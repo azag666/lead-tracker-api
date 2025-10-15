@@ -1,6 +1,6 @@
 {
   "name": "hottrack-saas-api",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "API SAAS para tracking de leads e conversões.",
   "main": "server.js",
   "scripts": {
