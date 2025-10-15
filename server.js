@@ -78,9 +78,7 @@ async function authenticateJwt(req, res, next) {
     });
 }
 
-// ==========================================================
-//          NOVO: MIDDLEWARE DE AUTENTICAÇÃO POR API KEY
-// ==========================================================
+// --- MIDDLEWARE DE AUTENTICAÇÃO POR API KEY ---
 async function authenticateApiKey(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
@@ -91,7 +89,6 @@ async function authenticateApiKey(req, res, next) {
         if (sellerResult.length === 0) {
             return res.status(401).json({ message: 'Chave de API inválida.' });
         }
-        // Anexa o ID do vendedor à requisição para uso posterior
         req.sellerId = sellerResult[0].id;
         next();
     } catch (error) {
@@ -99,6 +96,7 @@ async function authenticateApiKey(req, res, next) {
         res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 }
+
 
 // --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
 async function logApiRequest(req, res, next) {
@@ -285,6 +283,7 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
 }
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
+// ... (O código das suas rotas de admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
@@ -564,6 +563,7 @@ app.put('/api/admin/sellers/:id/commission', authenticateAdmin, async (req, res)
 });
 
 // --- ROTAS GERAIS DE USUÁRIO ---
+// ... (O resto das suas rotas existentes continua aqui, sem alterações)
 app.post('/api/sellers/register', async (req, res) => {
     const { name, email, password } = req.body;
 
@@ -1076,8 +1076,8 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
                 console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
 
                 if (checkoutId) {
-                     await sendMetaEvent('InitiateCheckout', { ...newClick, checkout_id: checkoutId }, { id: click_record_id });
-                     console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
+                    await sendMetaEvent('InitiateCheckout', { ...newClick, checkout_id: checkoutId }, { id: click_record_id });
+                    console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
                 }
             } catch (backgroundError) {
                 console.error("Erro em tarefa de segundo plano (registerClick):", backgroundError.message);
@@ -1096,7 +1096,7 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
     const { click_id } = req.body;
 
     if (!apiKey) return res.status(401).json({ message: 'API Key não fornecida.' });
-    if (!click_id) { // Adicionado para permitir validação de chave
+    if (!click_id) {
         const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
         return sellerResult.length > 0 ? res.status(200).json({ message: 'API Key válida.' }) : res.status(401).json({ message: 'API Key inválida.' });
     }
@@ -1104,19 +1104,16 @@ app.post('/api/click/info', logApiRequest, async (req, res) => {
     try {
         const sellerResult = await sql`SELECT id, email FROM sellers WHERE api_key = ${apiKey}`;
         if (sellerResult.length === 0) {
-            console.warn(`[CLICK INFO] Tentativa de consulta com API Key inválida: ${apiKey}`);
             return res.status(401).json({ message: 'API Key inválida.' });
         }
         
         const seller_id = sellerResult[0].id;
-        const seller_email = sellerResult[0].email;
         
         const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
         
         const clickResult = await sql`SELECT city, state FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${seller_id}`;
         
         if (clickResult.length === 0) {
-            console.warn(`[CLICK INFO NOT FOUND] Vendedor (ID: ${seller_id}, Email: ${seller_email}) tentou consultar o click_id "${click_id}", mas não foi encontrado.`);
             return res.status(404).json({ message: 'Click ID não encontrado para este vendedor.' });
         }
         
@@ -1418,8 +1415,9 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 });
 
 // ==========================================================
-//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM (VERSÃO FINAL)
+//          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM
 // ==========================================================
+// ... (O código do seu motor de fluxo e webhooks do Telegram permanece o mesmo)
 function findNextNode(currentNodeId, handleId, edges) {
     const edge = edges.find(edge => edge.source === currentNodeId && (edge.sourceHandle === handleId || !edge.sourceHandle || handleId === null));
     return edge ? edge.target : null;
@@ -1660,6 +1658,7 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 });
 
 
+// ... (O resto do seu código de webhooks e outras funções permanece o mesmo)
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
         const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
@@ -1864,10 +1863,9 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
     try {
         let pixelId = null;
 
-        // Tenta obter o pixel do checkout hospedado primeiro
         if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
             const [hostedCheckout] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${clickData.checkout_id}`;
-            if (hostedCheckout && hostedCheckout.config.tracking.pixel_id) {
+            if (hostedCheckout && hostedCheckout.config.tracking && hostedCheckout.config.tracking.pixel_id) {
                 pixelId = hostedCheckout.config.tracking.pixel_id;
             }
         }
@@ -1908,6 +1906,7 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
         const [pixelConfig] = await sql`SELECT meta_api_token FROM pixel_configurations WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}`;
+        
         if (pixelConfig && pixelConfig.meta_api_token) {
             const { meta_api_token } = pixelConfig;
             const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixelId}`;
