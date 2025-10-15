@@ -1185,14 +1185,14 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
 });
 
 // ########## ROTA DE TRANSAÇÕES CORRIGIDA ##########
-app.get('/api/transactions', authenticateJwt, async (req, res) => {
+appapp.get('/api/transactions', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
         const transactions = await sql`
             SELECT 
                 pt.status, 
                 pt.pix_value, 
-                COALESCE(tb.bot_name, ch.name, 'Checkout Hospedado') as source_name, 
+                COALESCE(tb.bot_name, ch.name, hc.config->>'product_name', 'Checkout Hospedado') as source_name, 
                 pt.provider, 
                 pt.created_at
             FROM pix_transactions pt 
@@ -1200,6 +1200,9 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
             LEFT JOIN pressels p ON c.pressel_id = p.id 
             LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
             LEFT JOIN checkouts ch ON c.checkout_id ~ '^[0-9]+$' AND c.checkout_id::integer = ch.id 
+            -- NOVO JOIN: Associa o clique ao Checkout Hospedado quando o ID for do tipo 'cko_...'
+            LEFT JOIN hosted_checkouts hc ON c.checkout_id LIKE 'cko_%' AND c.checkout_id = hc.id
+            -- FIM DO NOVO JOIN
             WHERE c.seller_id = ${sellerId}
             ORDER BY pt.created_at DESC;`;
         res.status(200).json(transactions);
