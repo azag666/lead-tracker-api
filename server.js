@@ -283,7 +283,6 @@ async function handleSuccessfulPayment(transaction_id, customerData) {
 }
 
 // --- ROTAS DO PAINEL ADMINISTRATIVO ---
-// ... (O código das suas rotas de admin permanece o mesmo)
 function authenticateAdmin(req, res, next) {
     const adminKey = req.headers['x-admin-api-key'];
     if (!adminKey || adminKey !== ADMIN_API_KEY) {
@@ -563,7 +562,6 @@ app.put('/api/admin/sellers/:id/commission', authenticateAdmin, async (req, res)
 });
 
 // --- ROTAS GERAIS DE USUÁRIO ---
-// ... (O resto das suas rotas existentes continua aqui, sem alterações)
 app.post('/api/sellers/register', async (req, res) => {
     const { name, email, password } = req.body;
 
@@ -1417,7 +1415,6 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
 // ==========================================================
 //          MOTOR DE FLUXO E WEBHOOK DO TELEGRAM
 // ==========================================================
-// ... (O código do seu motor de fluxo e webhooks do Telegram permanece o mesmo)
 function findNextNode(currentNodeId, handleId, edges) {
     const edge = edges.find(edge => edge.source === currentNodeId && (edge.sourceHandle === handleId || !edge.sourceHandle || handleId === null));
     return edge ? edge.target : null;
@@ -1658,7 +1655,6 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
 });
 
 
-// ... (O resto do seu código de webhooks e outras funções permanece o mesmo)
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
         const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
