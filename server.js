@@ -2104,5 +2104,60 @@ app.get('/api/oferta/:checkoutId', async (req, res) => {
         res.status(500).json({ message: 'Erro interno no servidor.' });
     }
 });
+// Adicione esta ROTA NOVA no seu server.js
+
+app.post('/api/oferta/generate-pix', async (req, res) => {
+    const { checkoutId, value_cents } = req.body;
+
+    if (!checkoutId || !value_cents) {
+        return res.status(400).json({ message: 'Dados insuficientes para gerar o PIX.' });
+    }
+
+    try {
+        // 1. Encontrar o vendedor a partir do ID do checkout
+        const [hostedCheckout] = await sql`
+            SELECT seller_id, config FROM hosted_checkouts WHERE id = ${checkoutId}
+        `;
+
+        if (!hostedCheckout) {
+            return res.status(404).json({ message: 'Checkout não encontrado.' });
+        }
+
+        const sellerId = hostedCheckout.seller_id;
+        const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
+        
+        if (!seller) {
+            return res.status(404).json({ message: 'Vendedor associado a este checkout não foi encontrado.' });
+        }
+
+        // 2. Registrar um clique para este checkout (essencial para o tracking)
+        const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
+        const user_agent = req.headers['user-agent'];
+        
+        const [newClick] = await sql`
+            INSERT INTO clicks (seller_id, checkout_id, ip_address, user_agent) 
+            VALUES (${sellerId}, ${checkoutId}, ${ip_address}, ${user_agent})
+            RETURNING id;
+        `;
+        const clickIdInternal = newClick.id;
+
+        // 3. Usar a função interna para gerar o PIX com as credenciais do vendedor
+        const provider = seller.pix_provider_primary || 'pushinpay'; // Usa o provedor primário do vendedor
+        const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key, ip_address);
+        
+        // 4. Salvar a transação no banco de dados, associando ao clique que acabamos de criar
+        await sql`
+            INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) 
+            VALUES (${clickIdInternal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})
+        `;
+
+        // 5. Enviar os dados do PIX de volta para o frontend
+        res.status(200).json(pixResult);
+
+    } catch (error) {
+        console.error("Erro ao gerar PIX da página de oferta:", error);
+        res.status(500).json({ message: 'Não foi possível gerar o PIX no momento.' });
+    }
+});
 
 module.exports = app;
