@@ -12,6 +12,10 @@
       "dest": "server.js"
     },
     {
+      "src": "/api/checkouts/create-hosted",
+      "dest": "server.js"
+    },
+    {
       "src": "/api/(.*)",
       "dest": "server.js"
     }
