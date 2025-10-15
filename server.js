@@ -12,7 +12,7 @@ const webpush = require('web-push');
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // Middleware global para processar JSON
+app.use(express.json({ limit: '10mb' })); // Middleware global para processar JSON e aumentar limite
 
 // --- OTIMIZAÇÃO CRÍTICA: A conexão com o banco é inicializada UMA VEZ e reutilizada ---
 const sql = neon(process.env.DATABASE_URL);
@@ -76,6 +76,28 @@ async function authenticateJwt(req, res, next) {
         req.user = user;
         next();
     });
+}
+
+// ==========================================================
+//          NOVO: MIDDLEWARE DE AUTENTICAÇÃO POR API KEY
+// ==========================================================
+async function authenticateApiKey(req, res, next) {
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey) {
+        return res.status(401).json({ message: 'Chave de API não fornecida.' });
+    }
+    try {
+        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        if (sellerResult.length === 0) {
+            return res.status(401).json({ message: 'Chave de API inválida.' });
+        }
+        // Anexa o ID do vendedor à requisição para uso posterior
+        req.sellerId = sellerResult[0].id;
+        next();
+    } catch (error) {
+        console.error("Erro na autenticação por API Key:", error);
+        res.status(500).json({ message: 'Erro interno do servidor.' });
+    }
 }
 
 // --- MIDDLEWARE DE LOG DE REQUISIÇÕES ---
@@ -150,8 +172,8 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         pixData = response.data;
         acquirer = "BRPix";
         return {
-            qr_code_text: pixData.pix.qrcode, // Alterado de pixData.pix.qrcodeText
-            qr_code_base64: pixData.pix.qrcode, // Mantido para consistência com a resposta atual
+            qr_code_text: pixData.pix.qrcode, 
+            qr_code_base64: pixData.pix.qrcode, 
             transaction_id: pixData.id,
             acquirer,
             provider
@@ -1054,10 +1076,8 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
                 console.log(`[BACKGROUND] Geolocalização atualizada para o clique ${click_record_id}.`);
 
                 if (checkoutId) {
-                    const [checkoutDetails] = await sql`SELECT fixed_value_cents FROM checkouts WHERE id = ${checkoutId}`;
-                    const eventValue = checkoutDetails ? (checkoutDetails.fixed_value_cents / 100) : 0;
-                    await sendMetaEvent('InitiateCheckout', { ...newClick, click_id: clean_click_id }, { pix_value: eventValue, id: click_record_id });
-                    console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
+                     await sendMetaEvent('InitiateCheckout', { ...newClick, checkout_id: checkoutId }, { id: click_record_id });
+                     console.log(`[BACKGROUND] Evento InitiateCheckout enviado para o clique ${click_record_id}.`);
                 }
             } catch (backgroundError) {
                 console.error("Erro em tarefa de segundo plano (registerClick):", backgroundError.message);
@@ -1074,7 +1094,12 @@ app.post('/api/registerClick', logApiRequest, async (req, res) => {
 app.post('/api/click/info', logApiRequest, async (req, res) => {
     const apiKey = req.headers['x-api-key'];
     const { click_id } = req.body;
-    if (!apiKey || !click_id) return res.status(400).json({ message: 'API Key e click_id são obrigatórios.' });
+
+    if (!apiKey) return res.status(401).json({ message: 'API Key não fornecida.' });
+    if (!click_id) { // Adicionado para permitir validação de chave
+        const sellerResult = await sql`SELECT id FROM sellers WHERE api_key = ${apiKey}`;
+        return sellerResult.length > 0 ? res.status(200).json({ message: 'API Key válida.' }) : res.status(401).json({ message: 'API Key inválida.' });
+    }
     
     try {
         const sellerResult = await sql`SELECT id, email FROM sellers WHERE api_key = ${apiKey}`;
@@ -1211,7 +1236,7 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
                 const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, apiKey, ip_address);
                 const [transaction] = await sql`INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) VALUES (${click.id}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id}) RETURNING id`;
                 
-                if (click.pressel_id) {
+                if (click.pressel_id || click.checkout_id) {
                     await sendMetaEvent('InitiateCheckout', click, { id: transaction.id, pix_value: value_cents / 100 }, null);
                 }
 
@@ -1837,14 +1862,17 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
 }
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     try {
-        let presselPixels = [];
-        if (clickData.pressel_id) {
-            presselPixels = await sql`SELECT pixel_config_id FROM pressel_pixels WHERE pressel_id = ${clickData.pressel_id}`;
-        } else if (clickData.checkout_id) {
-            presselPixels = await sql`SELECT pixel_config_id FROM checkout_pixels WHERE checkout_id = ${clickData.checkout_id}`;
-        }
+        let pixelId = null;
 
-        if (presselPixels.length === 0) {
+        // Tenta obter o pixel do checkout hospedado primeiro
+        if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
+            const [hostedCheckout] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${clickData.checkout_id}`;
+            if (hostedCheckout && hostedCheckout.config.tracking.pixel_id) {
+                pixelId = hostedCheckout.config.tracking.pixel_id;
+            }
+        }
+        
+        if (!pixelId) {
             console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}.`);
             return;
         }
@@ -1879,37 +1907,37 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
-        for (const { pixel_config_id } of presselPixels) {
-            const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE id = ${pixel_config_id}`;
-            if (pixelConfig) {
-                const { pixel_id, meta_api_token } = pixelConfig;
-                const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
-                
-                const payload = {
-                    data: [{
-                        event_name: eventName,
-                        event_time: Math.floor(Date.now() / 1000),
-                        event_id,
-                        user_data: userData,
-                        custom_data: {
-                            currency: 'BRL',
-                            value: transactionData.pix_value
-                        },
-                    }]
-                };
-                
-                if (eventName !== 'Purchase') {
-                    delete payload.data[0].custom_data.value;
-                }
-
-                console.log(`[Meta Pixel] Enviando payload para o pixel ${pixel_id}:`, JSON.stringify(payload, null, 2));
-                await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
-                console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
-
-                if (eventName === 'Purchase') {
-                     await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
-                }
+        const [pixelConfig] = await sql`SELECT meta_api_token FROM pixel_configurations WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}`;
+        if (pixelConfig && pixelConfig.meta_api_token) {
+            const { meta_api_token } = pixelConfig;
+            const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixelId}`;
+            
+            const payload = {
+                data: [{
+                    event_name: eventName,
+                    event_time: Math.floor(Date.now() / 1000),
+                    event_id,
+                    user_data: userData,
+                    custom_data: {
+                        currency: 'BRL',
+                        value: transactionData.pix_value
+                    },
+                }]
+            };
+            
+            if (eventName !== 'Purchase') {
+                delete payload.data[0].custom_data.value;
             }
+
+            console.log(`[Meta Pixel] Enviando payload para o pixel ${pixelId}:`, JSON.stringify(payload, null, 2));
+            await axios.post(`https://graph.facebook.com/v19.0/${pixelId}/events`, payload, { params: { access_token: meta_api_token } });
+            console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixelId}.`);
+
+            if (eventName === 'Purchase') {
+                 await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+            }
+        } else {
+             console.warn(`[Meta Pixel] Token da API não encontrado para o Pixel ID ${pixelId} do vendedor ${clickData.seller_id}. O evento não foi enviado.`);
         }
     } catch (error) {
         console.error(`Erro ao enviar evento '${eventName}' para a Meta. Detalhes:`, error.response?.data || error.message);
@@ -2010,22 +2038,16 @@ app.post('/api/webhook/syncpay', async (req, res) => {
 });
 
 app.post('/api/webhook/brpix', async (req, res) => {
-    // 1. Extrai os campos corretos ('type' e 'data') do corpo da requisição.
     const { type, data } = req.body; 
     console.log('[Webhook BRPix] Notificação recebida:', JSON.stringify(req.body, null, 2));
 
-    // 2. A condição de verificação é a mais importante.
-    //    Ela agora checa se o TIPO da notificação é 'transaction' e se o STATUS dentro dos dados é 'paid'.
     if (type === 'transaction' && data?.status === 'paid') {
         const transactionId = data.id;
         const customer = data.customer;
 
         try {
-            // 3. Busca a transação no seu banco de dados para garantir que ela existe.
             const [tx] = await sql`SELECT * FROM pix_transactions WHERE provider_transaction_id = ${transactionId} AND provider = 'brpix'`;
 
-            // 4. Medida de segurança: Atualiza o status APENAS se a transação for encontrada
-            //    e se o status dela ainda NÃO for 'paid', evitando processamento duplicado.
             if (tx && tx.status !== 'paid') {
                 console.log(`[Webhook BRPix] Transação ${tx.id} encontrada. Atualizando para PAGO.`);
                 await handleSuccessfulPayment(tx.id, { name: customer?.name, document: customer?.document });
@@ -2039,7 +2061,6 @@ app.post('/api/webhook/brpix', async (req, res) => {
         }
     }
 
-    // Responde à BRPix com status 200 para confirmar o recebimento.
     res.sendStatus(200);
 });
 
