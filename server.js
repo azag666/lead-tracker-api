@@ -2058,5 +2058,31 @@ app.post('/api/webhook/brpix', async (req, res) => {
 
     res.sendStatus(200);
 });
+  // --- ROTA PARA CRIAR CHECKOUTS HOSPEDADOS (NOVO CÓDIGO) ---
+app.post('/api/checkouts/create-hosted', authenticateApiKey, async (req, res) => {
+    const sellerId = req.sellerId;
+    const config = req.body;
+    
+    // Gera um ID único para o novo checkout
+    const checkoutId = `cko_${uuidv4()}`; // Adiciona um prefixo para identificação
+
+    try {
+        // Insere na nova tabela 'hosted_checkouts' que você criou
+        await sql`
+            INSERT INTO hosted_checkouts (id, seller_id, config)
+            VALUES (${checkoutId}, ${sellerId}, ${JSON.stringify(config)});
+        `;
+        
+        // Retorna o ID gerado para o front-end, para que ele possa montar o link final
+        res.status(201).json({ 
+            message: 'Checkout hospedado criado com sucesso!', 
+            checkoutId: checkoutId 
+        });
+
+    } catch (error) {
+        console.error("Erro ao criar checkout hospedado:", error);
+        res.status(500).json({ message: 'Erro interno ao criar o checkout.' });
+    }
+});
 
 module.exports = app;
