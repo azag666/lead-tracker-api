@@ -1351,7 +1351,7 @@ app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
         const [seller] = await sql`SELECT * FROM sellers WHERE id = ${sellerId}`;
         if (!seller) return res.status(404).json({ message: 'Vendedor não encontrado.' });
         
-        const value_cents = 3333;
+        const value_cents = 3333; // Valor de teste alterado para R$ 33,33
         
         const startTime = Date.now();
         const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key, ip_address);
@@ -1392,7 +1392,7 @@ app.post('/api/pix/test-priority-route', authenticateJwt, async (req, res) => {
             return res.status(400).json({ message: 'Nenhuma ordem de prioridade de provedores foi configurada.' });
         }
 
-        const value_cents = 3333;
+        const value_cents = 3333; // Valor de teste alterado para R$ 33,33
 
         for (const providerInfo of providerOrder) {
             const provider = providerInfo.name;
@@ -1879,22 +1879,50 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
     }
 }
+
+// #################################################################
+// #                INÍCIO DA FUNÇÃO sendMetaEvent CORRIGIDA               #
+// #################################################################
 async function sendMetaEvent(eventName, clickData, transactionData, customerData = null) {
     try {
-        let pixelId = null;
+        let pixelConfigs = []; // Irá armazenar { pixel_id, meta_api_token }
 
-        if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
+        if (clickData.pressel_id) {
+            // 1. Busca pixels associados a Pressels
+            pixelConfigs = await sql`
+                SELECT pc.pixel_id, pc.meta_api_token 
+                FROM pixel_configurations pc
+                JOIN pressel_pixels pp ON pc.id = pp.pixel_config_id
+                WHERE pp.pressel_id = ${clickData.pressel_id} AND pc.seller_id = ${clickData.seller_id}
+            `;
+        } else if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
+            // 2. Busca pixel de Checkouts Hospedados (cko_)
             const [hostedCheckout] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${clickData.checkout_id}`;
-            if (hostedCheckout && hostedCheckout.config.tracking && hostedCheckout.config.tracking.pixel_id) {
-                pixelId = hostedCheckout.config.tracking.pixel_id;
+            const pixelId = hostedCheckout?.config?.tracking?.pixel_id;
+            if (pixelId) {
+                const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}`;
+                if (pixelConfig) pixelConfigs.push(pixelConfig);
+            }
+        } else if (clickData.checkout_id) {
+            // 3. Busca pixels de Checkouts Antigos (numéricos)
+            const numericCheckoutId = parseInt(clickData.checkout_id, 10);
+            if (!isNaN(numericCheckoutId)) { // Garante que é um número
+                pixelConfigs = await sql`
+                    SELECT pc.pixel_id, pc.meta_api_token 
+                    FROM pixel_configurations pc
+                    JOIN checkout_pixels cp ON pc.id = cp.pixel_config_id
+                    WHERE cp.checkout_id = ${numericCheckoutId} AND pc.seller_id = ${clickData.seller_id}
+                `;
             }
         }
-        
-        if (!pixelId) {
-            console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}.`);
+
+        // Verifica se encontrou algum pixel
+        if (pixelConfigs.length === 0) {
+            console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}. Origem: pressel_id=${clickData.pressel_id}, checkout_id=${clickData.checkout_id}`);
             return;
         }
 
+        // --- CONSTRUÇÃO DO USERDATA ---
         const userData = {
             fbp: clickData.fbp || undefined,
             fbc: clickData.fbc || undefined,
@@ -1925,43 +1953,54 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
         
-        const [pixelConfig] = await sql`SELECT meta_api_token FROM pixel_configurations WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}`;
-        
-        if (pixelConfig && pixelConfig.meta_api_token) {
-            const { meta_api_token } = pixelConfig;
-            const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixelId}`;
-            
-            const payload = {
-                data: [{
-                    event_name: eventName,
-                    event_time: Math.floor(Date.now() / 1000),
-                    event_id,
-                    user_data: userData,
-                    custom_data: {
-                        currency: 'BRL',
-                        value: transactionData.pix_value
-                    },
-                }]
-            };
-            
-            if (eventName !== 'Purchase') {
-                delete payload.data[0].custom_data.value;
-            }
+        // --- LOOP DE ENVIO (A parte nova e crucial) ---
+        for (const pixelConfig of pixelConfigs) {
+            if (pixelConfig && pixelConfig.meta_api_token) {
+                const { pixel_id, meta_api_token } = pixelConfig;
+                const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
+                
+                const payload = {
+                    data: [{
+                        event_name: eventName,
+                        event_time: Math.floor(Date.now() / 1000),
+                        event_id,
+                        action_source: 'other',
+                        user_data: userData,
+                        custom_data: {
+                            currency: 'BRL',
+                            value: transactionData.pix_value
+                        },
+                    }]
+                };
+                
+                if (eventName !== 'Purchase') {
+                    delete payload.data[0].custom_data.value;
+                }
 
-            console.log(`[Meta Pixel] Enviando payload para o pixel ${pixelId}:`, JSON.stringify(payload, null, 2));
-            await axios.post(`https://graph.facebook.com/v19.0/${pixelId}/events`, payload, { params: { access_token: meta_api_token } });
-            console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixelId}.`);
+                try {
+                    console.log(`[Meta Pixel] Enviando payload para o pixel ${pixel_id}:`, JSON.stringify(payload, null, 2));
+                    await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
+                    console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
 
-            if (eventName === 'Purchase') {
-                 await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+                    if (eventName === 'Purchase') {
+                         await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+                    }
+                } catch (pixelError) {
+                    console.error(`Erro ao enviar evento '${eventName}' para o Pixel ID ${pixel_id}:`, pixelError.response?.data || pixelError.message);
+                }
+
+            } else {
+                 console.warn(`[Meta Pixel] Token da API não encontrado para o Pixel ID ${pixelConfig.pixel_id} do vendedor ${clickData.seller_id}.`);
             }
-        } else {
-             console.warn(`[Meta Pixel] Token da API não encontrado para o Pixel ID ${pixelId} do vendedor ${clickData.seller_id}. O evento não foi enviado.`);
         }
     } catch (error) {
-        console.error(`Erro ao enviar evento '${eventName}' para a Meta. Detalhes:`, error.response?.data || error.message);
+        console.error(`Erro geral ao enviar evento '${eventName}' para a Meta. Detalhes:`, error.response?.data || error.message);
     }
 }
+// #################################################################
+// #                 FIM DA FUNÇÃO sendMetaEvent CORRIGIDA                 #
+// #################################################################
+
 async function checkPendingTransactions() {
     try {
         const pendingTransactions = await sql`
@@ -2170,12 +2209,17 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
         const pixResult = await generatePixForProvider(provider, seller, value_cents, req.headers.host, seller.api_key, ip_address);
         
         // 4. Salvar a transação no banco de dados, associando ao clique que acabamos de criar
-        await sql`
+        const [transaction] = await sql`
             INSERT INTO pix_transactions (click_id_internal, pix_value, qr_code_text, qr_code_base64, provider, provider_transaction_id, pix_id) 
             VALUES (${clickIdInternal}, ${value_cents / 100}, ${pixResult.qr_code_text}, ${pixResult.qr_code_base64}, ${pixResult.provider}, ${pixResult.transaction_id}, ${pixResult.transaction_id})
+            RETURNING id;
         `;
+        
+        // 5. Enviar evento 'InitiateCheckout' para a Meta
+        await sendMetaEvent('InitiateCheckout', { ...newClick, id: clickIdInternal, seller_id: sellerId, checkout_id: checkoutId, ip_address: ip_address, user_agent: user_agent }, { id: transaction.id, pix_value: value_cents / 100 }, null);
 
-        // 5. Enviar os dados do PIX de volta para o frontend
+
+        // 6. Enviar os dados do PIX de volta para o frontend
         res.status(200).json(pixResult);
 
     } catch (error) {
