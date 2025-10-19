@@ -2559,6 +2559,7 @@ app.get('/api/obrigado/:pageId', async (req, res) => {
     }
 });
 // Trigger Utmify event from the Thank You Page frontend
+// *** ROTA ATUALIZADA COM O PAYLOAD CORRIGIDO ***
 app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
     const { pageId, trackingParameters, customerData } = req.body;
 
@@ -2588,14 +2589,15 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
         const purchaseValueCents = Math.round(page.config.purchase_value * 100);
         const commission_rate = seller.commission_rate || 0.0299;
 
-        // Prepare payload for Utmify
+        // Prepare payload for Utmify - CORRIGIDO
         const payload = {
             orderId: `ty_${pageId}_${Date.now()}`, // Generate a unique order ID
             platform: "HotTrack TY Page",
-            paymentMethod: 'card', // Assume card or other non-PIX method for TY page
+            paymentMethod: 'unknown', // Changed from 'card' to 'unknown'
             status: 'paid', // Assume payment is confirmed if they reach TY page
             createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
             approvedDate: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            refundedAt: null, // Add refundedAt as null
             customer: { // Use data passed from frontend, with fallbacks
                 name: customerData?.name || "Cliente",
                 email: customerData?.email || "email@desconhecido.com",
@@ -2605,10 +2607,20 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
             products: [{
                 id: `prod_${page.config.page_name.replace(/\s/g, '_')}`,
                 name: page.config.page_name,
+                planId: null, // Added, defaulting to null
+                planName: null, // Added, defaulting to null
                 quantity: 1,
                 priceInCents: purchaseValueCents
             }],
-            trackingParameters: trackingParameters || {}, // Use UTMs passed from frontend
+            trackingParameters: { // Ensure all UTM parameters exist, defaulting to null
+                src: trackingParameters?.src || null,
+                sck: trackingParameters?.sck || null,
+                utm_source: trackingParameters?.utm_source || null,
+                utm_campaign: trackingParameters?.utm_campaign || null,
+                utm_medium: trackingParameters?.utm_medium || null,
+                utm_content: trackingParameters?.utm_content || null,
+                utm_term: trackingParameters?.utm_term || null
+            },
             commission: {
                 totalPriceInCents: purchaseValueCents,
                 gatewayFeeInCents: Math.round(purchaseValueCents * commission_rate),
@@ -2629,6 +2641,7 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
         res.status(500).json({ message: 'Erro ao enviar evento para Utmify.' });
     }
 });
+// *** FIM DA ROTA ATUALIZADA ***
 
 
 // ########## NOVAS ROTAS PARA GERENCIAR CHECKOUTS HOSPEDADOS ##########
