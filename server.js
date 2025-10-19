@@ -2558,8 +2558,8 @@ app.get('/api/obrigado/:pageId', async (req, res) => {
         res.status(500).json({ message: 'Erro interno no servidor.' });
     }
 });
-// Trigger Utmify event from the Thank You Page frontend
-// *** ROTA ATUALIZADA COM O PAYLOAD CORRIGIDO ***
+
+// Trigger Utmify event from the Thank You Page frontend - ROTA ATUALIZADA
 app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
     const { pageId, trackingParameters, customerData } = req.body;
 
@@ -2641,8 +2641,111 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
         res.status(500).json({ message: 'Erro ao enviar evento para Utmify.' });
     }
 });
-// *** FIM DA ROTA ATUALIZADA ***
 
+// --- ROTAS PÁGINAS DE OBRIGADO (GERENCIAMENTO) ADICIONADAS ---
+
+// LISTAR PÁGINAS DE OBRIGADO DO VENDEDOR
+app.get('/api/thank-you-pages', authenticateJwt, async (req, res) => {
+    try {
+        const sellerId = req.user.id;
+        // Seleciona ID, nome (extraído do config) e data de criação
+        const pages = await sql`
+            SELECT
+                id,
+                config->>'page_name' as name, -- Extrai 'page_name' do JSON config
+                created_at
+            FROM thank_you_pages
+            WHERE seller_id = ${sellerId}
+            ORDER BY created_at DESC;
+        `;
+        res.status(200).json(pages);
+    } catch (error) {
+        console.error("Erro ao listar páginas de obrigado:", error);
+        res.status(500).json({ message: 'Erro ao buscar suas páginas de obrigado.' });
+    }
+});
+
+// BUSCAR UMA PÁGINA DE OBRIGADO ESPECÍFICA (PARA EDIÇÃO)
+app.get('/api/thank-you-pages/:pageId', authenticateJwt, async (req, res) => {
+    const { pageId } = req.params;
+    const sellerId = req.user.id;
+    try {
+        const [page] = await sql`
+            SELECT id, config FROM thank_you_pages
+            WHERE id = ${pageId} AND seller_id = ${sellerId};
+        `;
+        if (!page) {
+            return res.status(404).json({ message: 'Página de obrigado não encontrada ou não pertence a você.' });
+        }
+        res.status(200).json(page); // Retorna { id: 'ty_...', config: { ... } }
+    } catch (error) {
+        console.error(`Erro ao buscar página de obrigado ${pageId}:`, error);
+        res.status(500).json({ message: 'Erro interno ao buscar a página.' });
+    }
+});
+
+
+// ATUALIZAR UMA PÁGINA DE OBRIGADO
+app.put('/api/thank-you-pages/:pageId', authenticateApiKey, async (req, res) => { // Usando ApiKey para consistência com create
+    const { pageId } = req.params;
+    const sellerId = req.sellerId;
+    const newConfig = req.body; // Espera o objeto config atualizado
+
+    if (!pageId.startsWith('ty_')) {
+        return res.status(400).json({ message: 'ID de página inválido.' });
+    }
+    if (!newConfig || typeof newConfig !== 'object') {
+        return res.status(400).json({ message: 'Configuração inválida fornecida.' });
+    }
+     // Valida campos essenciais no newConfig
+    if (!newConfig.page_name || !newConfig.purchase_value || !newConfig.pixel_id || !newConfig.redirect_url) {
+        return res.status(400).json({ message: 'Dados insuficientes para atualizar a página.' });
+    }
+
+    try {
+        const result = await sql`
+            UPDATE thank_you_pages
+            SET config = ${JSON.stringify(newConfig)}, updated_at = NOW()
+            WHERE id = ${pageId} AND seller_id = ${sellerId}
+            RETURNING id;
+        `;
+        if (result.length === 0) {
+            return res.status(404).json({ message: 'Página não encontrada ou você não tem permissão para editá-la.' });
+        }
+        res.status(200).json({ message: 'Página de obrigado atualizada com sucesso!', pageId: result[0].id });
+    } catch (error) {
+        console.error(`Erro ao atualizar página de obrigado ${pageId}:`, error);
+        res.status(500).json({ message: 'Erro interno ao atualizar a página.' });
+    }
+});
+
+// DELETAR UMA PÁGINA DE OBRIGADO
+app.delete('/api/thank-you-pages/:pageId', authenticateJwt, async (req, res) => {
+    const { pageId } = req.params;
+    const sellerId = req.user.id;
+
+    if (!pageId.startsWith('ty_')) {
+        return res.status(400).json({ message: 'ID de página inválido.' });
+    }
+
+    try {
+        // Deleta diretamente, não há dependências complexas como nos checkouts
+        const result = await sql`
+            DELETE FROM thank_you_pages
+            WHERE id = ${pageId} AND seller_id = ${sellerId}
+            RETURNING id;
+        `;
+        if (result.length === 0) {
+             console.warn(`Tentativa de excluir página TY não encontrada ou não pertencente ao seller: ${pageId}, Seller: ${sellerId}`);
+        }
+        res.status(200).json({ message: 'Página de obrigado excluída com sucesso!' });
+    } catch (error) {
+        console.error(`Erro ao excluir página de obrigado ${pageId}:`, error);
+        res.status(500).json({ message: 'Erro interno ao excluir a página.' });
+    }
+});
+
+// --- FIM DAS ROTAS DE GERENCIAMENTO DE PÁGINAS DE OBRIGADO ---
 
 // ########## NOVAS ROTAS PARA GERENCIAR CHECKOUTS HOSPEDADOS ##########
 
