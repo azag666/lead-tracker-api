@@ -2227,5 +2227,121 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
         res.status(500).json({ message: 'Não foi possível gerar o PIX no momento.' });
     }
 });
+// ROTA PARA CRIAR PÁGINAS DE OBRIGADO
+app.post('/api/thank-you-pages/create', authenticateApiKey, async (req, res) => {
+    const sellerId = req.sellerId;
+    const config = req.body;
+
+    if (!config.page_name || !config.purchase_value || !config.pixel_id || !config.redirect_url) {
+        return res.status(400).json({ message: 'Dados insuficientes para criar a página.' });
+    }
+    
+    const pageId = `ty_${uuidv4()}`;
+
+    try {
+        await sql`
+            INSERT INTO thank_you_pages (id, seller_id, config)
+            VALUES (${pageId}, ${sellerId}, ${JSON.stringify(config)});
+        `;
+        
+        res.status(201).json({ 
+            message: 'Página de obrigado criada com sucesso!', 
+            pageId: pageId 
+        });
+
+    } catch (error) {
+        console.error("Erro ao criar página de obrigado:", error);
+        res.status(500).json({ message: 'Erro interno ao criar a página.' });
+    }
+});
+
+// ROTA PARA BUSCAR DADOS DE UMA PÁGINA DE OBRIGADO
+app.get('/api/obrigado/:pageId', async (req, res) => {
+    const { pageId } = req.params;
+
+    try {
+        const [page] = await sql`
+            SELECT seller_id, config FROM thank_you_pages WHERE id = ${pageId}
+        `;
+
+        if (!page) {
+            return res.status(404).json({ message: 'Página de obrigado não encontrada.' });
+        }
+        
+        res.status(200).json({
+            config: page.config,
+        });
+
+    } catch (error) {
+        console.error("Erro ao buscar dados da página de obrigado:", error);
+        res.status(500).json({ message: 'Erro interno no servidor.' });
+    }
+});
+// ROTA PARA DISPARAR EVENTO UTMIFY A PARTIR DA PÁGINA DE OBRIGADO
+app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
+    const { pageId, trackingParameters, customerData } = req.body;
+
+    try {
+        const [page] = await sql`
+            SELECT seller_id, config FROM thank_you_pages WHERE id = ${pageId}
+        `;
+
+        if (!page || !page.config.utmify_integration_id) {
+            return res.status(404).json({ message: 'Página ou integração Utmify não configurada.' });
+        }
+
+        const [integration] = await sql`
+            SELECT api_token FROM utmify_integrations WHERE id = ${page.config.utmify_integration_id}
+        `;
+
+        if (!integration || !integration.api_token) {
+             return res.status(401).json({ message: 'Token da integração Utmify não encontrado.' });
+        }
+        
+        const [seller] = await sql`SELECT commission_rate FROM sellers WHERE id = ${page.seller_id}`;
+        
+        const purchaseValueCents = Math.round(page.config.purchase_value * 100);
+        const commission_rate = seller.commission_rate || 0.0299;
+
+        const payload = {
+            orderId: `ty_${pageId}_${Date.now()}`,
+            platform: "HotTrack TY Page",
+            paymentMethod: 'card',
+            status: 'paid',
+            createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            approvedDate: new Date().toISOString().replace('T', ' ').substring(0, 19),
+            customer: {
+                name: customerData.name || "Cliente",
+                email: customerData.email || "email@desconhecido.com",
+                phone: customerData.phone || null,
+                document: null,
+            },
+            products: [{
+                id: `prod_${page.config.page_name.replace(/\s/g, '_')}`,
+                name: page.config.page_name,
+                quantity: 1,
+                priceInCents: purchaseValueCents
+            }],
+            trackingParameters: trackingParameters || {},
+            commission: {
+                totalPriceInCents: purchaseValueCents,
+                gatewayFeeInCents: Math.round(purchaseValueCents * commission_rate),
+                userCommissionInCents: Math.round(purchaseValueCents * (1 - commission_rate))
+            },
+            isTest: false
+        };
+
+        await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
+            headers: { 'x-api-token': integration.api_token }
+        });
+
+        res.status(200).json({ message: 'Evento Utmify enviado.' });
+
+    } catch (error) {
+        console.error(`[Utmify TY Page Error]`, error.response?.data || error.message);
+        res.status(500).json({ message: 'Erro ao enviar evento para Utmify.' });
+    }
+});
+
 
 module.exports = app;
