@@ -1269,18 +1269,20 @@ app.get('/api/dashboard/metrics', authenticateJwt, async (req, res) => {
     }
 });
 
-// ########## ROTA DE TRANSAÇÕES CORRIGIDA FINALMENTE ##########
+// ########## ROTA DE TRANSAÇÕES CORRIGIDA ##########
 app.get('/api/transactions', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const { startDate, endDate } = req.query;
+        const { startDate, endDate } = req.query; // Pega as datas da query string
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // Construir a string da query base
-        let queryString = `
+        // Constrói a consulta SQL inteira dentro de UMA chamada sql``
+        // Esta é a forma correta de lidar com consultas dinâmicas na biblioteca neon
+        const transactions = await sql`
             SELECT
                 pt.status,
                 pt.pix_value,
+                -- COALESCE para pegar o nome da origem (Bot, Checkout Hospedado, ou padrão)
                 COALESCE(tb.bot_name, hc.config->'content'->>'main_title', 'Checkout Desconhecido') as source_name,
                 pt.provider,
                 pt.created_at
@@ -1289,26 +1291,14 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
             LEFT JOIN pressels p ON c.pressel_id = p.id
             LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
             LEFT JOIN hosted_checkouts hc ON c.checkout_id = hc.id
-            WHERE c.seller_id = $1
+            WHERE c.seller_id = ${sellerId}
+            ${hasDateFilter ? sql`AND pt.created_at BETWEEN ${startDate} AND ${endDate}` : sql``} -- Adiciona filtro de data condicionalmente
+            ORDER BY pt.created_at DESC;
         `;
-        const queryParams = [sellerId]; // Array para os parâmetros
-
-        if (hasDateFilter) {
-            // Adicionar a condição de data à string e os parâmetros ao array
-            queryString += ` AND pt.created_at BETWEEN $2 AND $3`;
-            queryParams.push(startDate);
-            queryParams.push(endDate);
-        }
-
-        // Adicionar a ordenação
-        queryString += ` ORDER BY pt.created_at DESC;`;
-
-        // Executar a consulta com a string construída e o array de parâmetros
-        const transactions = await sql.unsafe(queryString, queryParams);
 
         res.status(200).json(transactions);
     } catch (error) {
-        console.error("Erro ao buscar transações:", error); // Log o erro completo
+        console.error("Erro ao buscar transações:", error); // Loga o erro completo no console
         res.status(500).json({ message: 'Erro ao buscar dados das transações.' });
     }
 });
