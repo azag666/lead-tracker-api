@@ -181,7 +181,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         acquirer = "BRPix";
         return {
             qr_code_text: pixData.pix.qrcode, // The PIX copy-paste code
-            qr_code_base64: pixData.pix.qrcode, // BRPix returns the same for both
+            qr_code_base64: pixData.pix.qrcode_base64, // BRPix now provides base64
             transaction_id: pixData.id, // BRPix's transaction ID
             acquirer,
             provider
@@ -210,7 +210,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         acquirer = "SyncPay";
         return {
             qr_code_text: pixData.pix_code,
-            qr_code_base64: null, // SyncPay doesn't provide base64 QR code directly in this response
+            qr_code_base64: pixData.base64image || null, // Check if base64image is returned
             transaction_id: pixData.identifier, // SyncPay's transaction ID
             acquirer,
             provider
@@ -254,6 +254,7 @@ async function generatePixForProvider(provider, seller, value_cents, host, apiKe
         return { qr_code_text: pixData.qr_code, qr_code_base64: pixData.qr_code_base64, transaction_id: pixData.id, acquirer, provider: 'pushinpay' };
     }
 }
+
 
 async function handleSuccessfulPayment(transaction_id, customerData) {
     try {
@@ -1386,7 +1387,8 @@ app.post('/api/pix/generate', logApiRequest, async (req, res) => {
         res.status(500).json({ message: 'Erro interno ao processar a geração de PIX.' });
     }
 });
-// Check PIX status via API key
+
+// Check PIX status via API key (MODIFICADO PARA RETORNAR REDIRECT URL)
 app.get('/api/pix/status/:transaction_id', async (req, res) => {
     const apiKey = req.headers['x-api-key'];
     const { transaction_id } = req.params; // Can be provider's ID or our internal pix_id
@@ -1403,58 +1405,76 @@ app.get('/api/pix/status/:transaction_id', async (req, res) => {
 
         // Find the transaction using either provider_transaction_id or pix_id
         const [transaction] = await sql`
-            SELECT pt.* FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
+            SELECT pt.*, c.checkout_id, c.click_id -- Inclui checkout_id e click_id do clique original
+            FROM pix_transactions pt JOIN clicks c ON pt.click_id_internal = c.id
             WHERE (pt.provider_transaction_id = ${transaction_id} OR pt.pix_id = ${transaction_id}) AND c.seller_id = ${seller.id}`;
 
         if (!transaction) {
             return res.status(404).json({ status: 'not_found', message: 'Transação não encontrada.' });
         }
 
-        // If already marked as paid in our DB, return immediately
-        if (transaction.status === 'paid') {
-            return res.status(200).json({ status: 'paid' });
-        }
+        let currentStatus = transaction.status;
+        let customerData = {}; // Para armazenar dados do cliente se consultarmos o provedor
 
-        // For providers relying solely on webhooks, just return pending status
-        if (transaction.provider === 'oasyfy' || transaction.provider === 'cnpay' || transaction.provider === 'brpix') {
-            return res.status(200).json({ status: 'pending', message: 'Aguardando confirmação via webhook.' });
-        }
+        // Se o status no DB ainda é 'pending', verifica com o provedor (se aplicável)
+        if (currentStatus === 'pending' && transaction.provider !== 'oasyfy' && transaction.provider !== 'cnpay' && transaction.provider !== 'brpix') {
+            let providerStatus;
+            try {
+                if (transaction.provider === 'syncpay') {
+                    const syncPayToken = await getSyncPayAuthToken(seller);
+                    const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
+                        headers: { 'Authorization': `Bearer ${syncPayToken}` }
+                    });
+                    providerStatus = response.data.status;
+                    customerData = response.data.payer; // Pega dados do cliente da SyncPay
+                } else if (transaction.provider === 'pushinpay') {
+                    const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
+                    providerStatus = response.data.status;
+                    customerData = { name: response.data.payer_name, document: response.data.payer_document }; // Pega dados do cliente da PushinPay
+                }
 
-        // For providers that allow status checking via API (PushinPay, SyncPay)
-        let providerStatus, customerData = {};
-        try {
-            if (transaction.provider === 'syncpay') {
-                const syncPayToken = await getSyncPayAuthToken(seller);
-                const response = await axios.get(`${SYNCPAY_API_BASE_URL}/api/partner/v1/transaction/${transaction.provider_transaction_id}`, {
-                    headers: { 'Authorization': `Bearer ${syncPayToken}` }
-                });
-                providerStatus = response.data.status;
-                customerData = response.data.payer;
-            } else if (transaction.provider === 'pushinpay') {
-                const response = await axios.get(`https://api.pushinpay.com.br/api/transactions/${transaction.provider_transaction_id}`, { headers: { Authorization: `Bearer ${seller.pushinpay_token}` } });
-                providerStatus = response.data.status;
-                customerData = { name: response.data.payer_name, document: response.data.payer_document }; // Extract customer info if available
+                // Se o provedor confirmar o pagamento, atualiza nosso status
+                if (providerStatus === 'paid' || providerStatus === 'COMPLETED') {
+                    await handleSuccessfulPayment(transaction.id, customerData); // Processa pagamento (envia eventos, etc.)
+                    currentStatus = 'paid'; // Atualiza o status localmente para a resposta
+                }
+            } catch (providerError) {
+                // Loga erro mas continua, retornando 'pending' se não puder confirmar
+                if (!providerError.response || providerError.response.status !== 404) { // Ignora erros 404 (transação talvez não exista ainda no provedor)
+                    console.error(`Falha ao consultar o provedor (${transaction.provider}) para a transação ${transaction.id}:`, providerError.message);
+                }
             }
-        } catch (providerError) {
-             // Log error but return 'pending' as we couldn't confirm
-             console.error(`Falha ao consultar o provedor para a transação ${transaction.id}:`, providerError.message);
-             return res.status(200).json({ status: 'pending' });
         }
 
-        // If provider confirms payment, update our DB and trigger events
-        if (providerStatus === 'paid' || providerStatus === 'COMPLETED') { // Check for both possible 'paid' statuses
-            await handleSuccessfulPayment(transaction.id, customerData); // Process the successful payment
-            return res.status(200).json({ status: 'paid' });
+        // Se o status final (do DB ou após consulta) for 'paid'
+        if (currentStatus === 'paid') {
+            let redirectUrl = null;
+            // Busca a URL de redirecionamento do checkout associado
+            if (transaction.checkout_id && transaction.checkout_id.startsWith('cko_')) {
+                const [checkoutConfig] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${transaction.checkout_id}`;
+                // *** AJUSTE AQUI o caminho se necessário ***
+                redirectUrl = checkoutConfig?.config?.redirects?.success_url || null; // Exemplo de caminho
+                 if (!redirectUrl) {
+                     console.warn(`[PIX Status] Checkout ${transaction.checkout_id} não possui 'config.redirects.success_url' definida.`);
+                 }
+            }
+            // Retorna status 'paid' e a URL encontrada (ou null) e o click_id original
+            return res.status(200).json({
+                status: 'paid',
+                redirectUrl: redirectUrl,
+                click_id: transaction.click_id // Retorna o click_id original
+             });
         }
 
-        // Otherwise, it's still pending
-        res.status(200).json({ status: 'pending' });
+        // Se não for 'paid', retorna o status atual ('pending' ou outro)
+        res.status(200).json({ status: currentStatus });
 
     } catch (error) {
         console.error("Erro ao consultar status da transação:", error);
         res.status(500).json({ message: 'Erro interno ao consultar o status.' });
     }
 });
+
 // Test connection and generate a sample PIX for a specific provider
 app.post('/api/pix/test-provider', authenticateJwt, async (req, res) => {
     const sellerId = req.user.id;
@@ -2207,7 +2227,7 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
             status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
             customer: { name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com", phone: customerData?.phone || null, document: customerData?.document || null, },
             products: [{ id: productData?.id || "default_product", name: productData?.name || "Produto Digital", planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100) }],
-            trackingParameters: { src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign, utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term },
+            trackingParameters: { src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign, utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term, click_id: clickData.click_id?.replace('/start ', '') || null }, // Adiciona click_id aqui
             commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * (sellerData.commission_rate || 0.0299)), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - (sellerData.commission_rate || 0.0299))) },
             isTest: false // Set to true for testing if needed
         };
@@ -2445,7 +2465,7 @@ app.get('/api/oferta/:checkoutId', async (req, res) => {
 });
 
 // ==========================================================
-// ROTA GERAR PIX DA PÁGINA DE OFERTA (MODIFICADA)
+// ROTA GERAR PIX DA PÁGINA DE OFERTA (MODIFICADA COM CLICK_ID)
 // ==========================================================
 app.post('/api/oferta/generate-pix', async (req, res) => {
     // 1. Capture o click_id do corpo da requisição
@@ -2475,21 +2495,22 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
         // 2. Lógica de Rastreamento de Clique (Modificada)
         const ip_address = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
         const user_agent = req.headers['user-agent'];
-        
+
         let clickData;
         let clickIdInternal;
 
         if (click_id) {
             // Se um click_id foi fornecido, encontre-o
+            // Aceita tanto "/start lead..." quanto apenas "lead..."
             const db_click_id = click_id.startsWith('/start ') ? click_id : `/start ${click_id}`;
             const [existingClick] = await sql`SELECT * FROM clicks WHERE click_id = ${db_click_id} AND seller_id = ${sellerId}`;
-            
+
             if (existingClick) {
                 clickData = existingClick;
                 clickIdInternal = existingClick.id;
                 console.log(`[Checkout PIX] Usando click_id existente: ${click_id} (ID: ${clickIdInternal})`);
-                // Opcional: Atualiza o checkout_id se for o primeiro PIX desse clique
-                if (!existingClick.checkout_id) {
+                // Opcional: Atualiza o checkout_id se for o primeiro PIX desse clique OU se for diferente
+                if (!existingClick.checkout_id || existingClick.checkout_id !== checkoutId) {
                     await sql`UPDATE clicks SET checkout_id = ${checkoutId} WHERE id = ${clickIdInternal}`;
                     clickData.checkout_id = checkoutId; // Atualiza o objeto em memória
                 }
@@ -2509,10 +2530,10 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
             [clickData] = await sql`
                 INSERT INTO clicks (seller_id, checkout_id, ip_address, user_agent)
                 VALUES (${sellerId}, ${checkoutId}, ${ip_address}, ${user_agent})
-                RETURNING *; 
+                RETURNING *;
             `;
             clickIdInternal = clickData.id;
-            
+
             // Gera e salva o click_id 'lead...' no banco
             const clean_click_id = `lead${clickIdInternal.toString().padStart(6, '0')}`;
             const db_click_id_new = `/start ${clean_click_id}`;
@@ -2536,7 +2557,7 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
         await sendMetaEvent('InitiateCheckout', clickData, { id: transaction.id, pix_value: value_cents / 100 }, null);
 
 
-        // 6. Return PIX details to the frontend
+        // 6. Return PIX details to the frontend (incluindo transaction_id e qr_code_base64)
         res.status(200).json(pixResult);
 
     } catch (error) {
@@ -2547,6 +2568,7 @@ app.post('/api/oferta/generate-pix', async (req, res) => {
 // ==========================================================
 // FIM DA ROTA MODIFICADA
 // ==========================================================
+
 
 // ROTAS PÁGINAS DE OBRIGADO
 // Create a new Thank You Page configuration
@@ -2634,7 +2656,7 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
         const purchaseValueCents = Math.round(page.config.purchase_value * 100);
         const commission_rate = seller.commission_rate || 0.0299;
 
-        // Prepare payload for Utmify - CORRIGIDO
+        // Prepare payload for Utmify - CORRIGIDO e com click_id
         const payload = {
             orderId: `ty_${pageId}_${Date.now()}`, // Generate a unique order ID
             platform: "HotTrack TY Page",
@@ -2665,7 +2687,7 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
                 utm_medium: trackingParameters?.utm_medium || null,
                 utm_content: trackingParameters?.utm_content || null,
                 utm_term: trackingParameters?.utm_term || null,
-                click_id: trackingParameters?.click_id || null // Adiciona o click_id
+                click_id: trackingParameters?.click_id || null // Adiciona o click_id capturado
             },
             commission: {
                 totalPriceInCents: purchaseValueCents,
@@ -2674,11 +2696,6 @@ app.post('/api/thank-you-pages/fire-utmify', async (req, res) => {
             },
             isTest: false
         };
-        
-        // Se o click_id existir nos trackingParameters, anexa-o ao payload.
-        if (trackingParameters && trackingParameters.click_id) {
-            payload.trackingParameters.click_id = trackingParameters.click_id;
-        }
 
         // Send event to Utmify
         await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, {
