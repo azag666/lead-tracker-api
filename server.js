@@ -1276,8 +1276,8 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query; // Pega as datas da query string
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // Monta a parte base da consulta SQL usando a tag `sql`
-        const baseSelect = sql`
+        // Constrói a consulta SQL inteira dentro de UMA chamada sql``
+        const query = sql`
             SELECT
                 pt.status,
                 pt.pix_value,
@@ -1291,17 +1291,9 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
             LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
             LEFT JOIN hosted_checkouts hc ON c.checkout_id = hc.id
             WHERE c.seller_id = ${sellerId}
+            ${hasDateFilter ? sql`AND pt.created_at BETWEEN ${startDate} AND ${endDate}` : sql``} -- Adiciona filtro de data condicionalmente
+            ORDER BY pt.created_at DESC;
         `;
-
-        let query; // Declara a variável query
-
-        if (hasDateFilter) {
-            // Se houver filtro de data, adiciona a cláusula BETWEEN e ORDER BY dentro da mesma chamada `sql`
-            query = sql`${baseSelect} AND pt.created_at BETWEEN ${startDate} AND ${endDate} ORDER BY pt.created_at DESC;`;
-        } else {
-            // Se não houver filtro, apenas adiciona ORDER BY na mesma chamada `sql`
-            query = sql`${baseSelect} ORDER BY pt.created_at DESC;`;
-        }
 
         // Executa a consulta SQL construída
         const transactions = await query;
@@ -1866,12 +1858,15 @@ app.post('/api/webhook/telegram/:botId', async (req, res) => {
         // Avoid sending response here as it might have already been sent
     }
 });
+// ==========================================================
+//                   FIM DO MOTOR DE FLUXO
+// ==========================================================
 
 
-// ROTA ANTIGA DE DISPAROS (/api/dispatches, /api/dispatches/:id, /api/bots/mass-send)
+// ROTA DE DISPAROS (/api/dispatches, /api/dispatches/:id, /api/bots/mass-send)
 app.get('/api/dispatches', authenticateJwt, async (req, res) => {
     try {
-        const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY sent_at DESC;`;
+        const dispatches = await sql`SELECT * FROM mass_sends WHERE seller_id = ${req.user.id} ORDER BY created_at DESC;`; // Changed sent_at to created_at if that's the column name
         res.status(200).json(dispatches);
     } catch (error) {
         console.error("Erro ao buscar histórico de disparos:", error);
@@ -1881,12 +1876,14 @@ app.get('/api/dispatches', authenticateJwt, async (req, res) => {
 app.get('/api/dispatches/:id', authenticateJwt, async (req, res) => {
     const { id } = req.params;
     try {
+        // Fetch details joining with telegram_chats to get user info
         const details = await sql`
             SELECT d.*, u.first_name, u.username
             FROM mass_send_details d
-            LEFT JOIN telegram_chats u ON d.chat_id = u.chat_id
+            -- Use LEFT JOIN in case chat info is missing for a chat_id
+            LEFT JOIN telegram_chats u ON d.chat_id = u.chat_id AND d.mass_send_id = ${id} -- May need to adjust join condition if chat_id isn't unique across bots/sellers
             WHERE d.mass_send_id = ${id}
-            ORDER BY d.sent_at;
+            ORDER BY d.created_at; -- Assuming created_at exists in mass_send_details
         `;
         res.status(200).json(details);
     } catch (error) {
@@ -1904,45 +1901,51 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
     }
 
     try {
+        // Validate selected bots belong to the user
         const bots = await sql`SELECT id, bot_token FROM telegram_bots WHERE id = ANY(${botIds}) AND seller_id = ${sellerId}`;
         if (bots.length === 0) return res.status(404).json({ message: 'Nenhum bot válido selecionado.' });
 
+        // Get unique users for the selected bots
         const users = await sql`SELECT DISTINCT ON (chat_id) chat_id, bot_id FROM telegram_chats WHERE bot_id = ANY(${botIds}) AND seller_id = ${sellerId}`;
         if (users.length === 0) return res.status(404).json({ message: 'Nenhum usuário encontrado para os bots selecionados.' });
 
-        // Log the main dispatch job
+        // Log the main dispatch job as PENDING
         const [log] = await sql`INSERT INTO mass_sends (seller_id, campaign_name, status, total_users) VALUES (${sellerId}, ${campaignName}, 'PENDING', ${users.length}) RETURNING id;`;
         const logId = log.id;
 
+        // Respond immediately that the job is scheduled
         res.status(202).json({ message: `Disparo "${campaignName}" agendado para ${users.length} usuários. Acompanhe o progresso no histórico.`, logId });
 
-        // --- Start background processing ---
+        // --- Start background processing (no await here) ---
         (async () => {
             await sql`UPDATE mass_sends SET status = 'RUNNING' WHERE id = ${logId}`;
             let successCount = 0, failureCount = 0;
             const botTokenMap = new Map(bots.map(b => [b.id, b.bot_token]));
 
+            // Iterate through each unique user
             for (const user of users) {
                 const botToken = botTokenMap.get(user.bot_id);
-                if (!botToken) { failureCount++; continue; } // Skip if bot token not found for user's bot_id
+                if (!botToken) { failureCount++; continue; } // Skip if bot token not found
 
                 let stepSuccess = true;
+                // Iterate through each step defined in the flow
                 for (const step of flowSteps) {
                     try {
                         let response;
                         let payload = { chat_id: user.chat_id, parse_mode: 'HTML' };
                         let endpoint = 'sendMessage';
 
+                        // Build payload based on step type
                         switch (step.type) {
                             case 'message':
-                                payload.text = step.text; // Add variable replacement here if needed: replacePlaceholders(step.text, user);
+                                payload.text = step.text; // Consider adding variable replacement here: replacePlaceholders(step.text, user);
                                 if (step.buttonText && step.buttonUrl) {
                                     payload.reply_markup = { inline_keyboard: [[{ text: step.buttonText, url: step.buttonUrl }]] };
                                 }
                                 endpoint = 'sendMessage';
                                 break;
                             case 'image':
-                                payload.photo = step.fileUrl;
+                                payload.photo = step.fileUrl; // Expects a Telegram file_id or public URL
                                 if (step.caption) payload.caption = step.caption; // Add variable replacement: replacePlaceholders(step.caption, user);
                                 endpoint = 'sendPhoto';
                                 break;
@@ -1956,40 +1959,44 @@ app.post('/api/bots/mass-send', authenticateJwt, async (req, res) => {
                                 if (step.caption) payload.caption = step.caption; // Add variable replacement: replacePlaceholders(step.caption, user);
                                 endpoint = 'sendAudio';
                                 break;
-                            // PIX steps require different handling - maybe trigger a flow or use callback_query?
-                            // For simplicity, skipping PIX steps in mass send for now.
+                            // PIX steps are complex for mass send, skipping for now
                             case 'pix':
                             case 'check_pix':
                                 console.warn(`[Mass Send ${logId}] PIX steps not supported in direct mass send. Skipping for chat ${user.chat_id}.`);
-                                continue; // Skip this step for this user
+                                continue; // Skip PIX steps
                             default:
                                 console.warn(`[Mass Send ${logId}] Unknown step type: ${step.type}`);
-                                continue;
+                                continue; // Skip unknown steps
                         }
 
+                        // Send the message/media via Telegram API
                         const apiUrl = `https://api.telegram.org/bot${botToken}/${endpoint}`;
-                        await axios.post(apiUrl, payload, { timeout: 15000 }); // Increased timeout
-                        await new Promise(resolve => setTimeout(resolve, 350)); // Slightly increased delay
+                        await axios.post(apiUrl, payload, { timeout: 15000 }); // Increased timeout for potentially large media
+                        // Small delay to respect Telegram rate limits
+                        await new Promise(resolve => setTimeout(resolve, 350)); // ~3 messages per second
 
                     } catch (stepError) {
-                        stepSuccess = false;
+                        stepSuccess = false; // Mark failure for this user
                         const errorMessage = stepError.response?.data?.description || stepError.message;
                         console.error(`[Mass Send ${logId}] Falha no passo ${step.type} para ${user.chat_id}: ${errorMessage}`);
+                        // Log detailed failure
                         await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status, details) VALUES (${logId}, ${user.chat_id}, 'failure', ${`Passo ${step.type}: ${errorMessage}`})`;
                         break; // Stop sending subsequent steps to this user on failure
                     }
                 } // End loop through steps for one user
 
+                // Log success or update failure count
                 if (stepSuccess) {
                     successCount++;
                     await sql`INSERT INTO mass_send_details (mass_send_id, chat_id, status) VALUES (${logId}, ${user.chat_id}, 'success')`;
                 } else {
                     failureCount++;
                 }
-                // Rate limiting delay between users
-                await new Promise(resolve => setTimeout(resolve, 50)); // Adjust as needed
+                // Small delay between users
+                await new Promise(resolve => setTimeout(resolve, 50)); // Adjust as needed, e.g., based on Telegram limits (~30/sec)
             } // End loop through users
 
+            // Update the main dispatch log with final counts and status
             await sql`UPDATE mass_sends SET success_count = ${successCount}, failure_count = ${failureCount}, status = 'COMPLETED', finished_at = NOW() WHERE id = ${logId};`;
             console.log(`Disparo ${logId} concluído. Sucessos: ${successCount}, Falhas: ${failureCount}`);
         })(); // --- End background processing ---
@@ -2683,8 +2690,6 @@ app.delete('/api/checkouts/:checkoutId', authenticateJwt, async (req, res) => {
 
     try {
         // IMPORTANT: First, delete associated clicks to avoid foreign key constraint errors
-        // This assumes 'clicks' table has a 'checkout_id' column that references 'hosted_checkouts.id'
-        // AND that 'pix_transactions' references 'clicks.id' with ON DELETE CASCADE or similar handling.
         await sql `DELETE FROM clicks WHERE checkout_id = ${checkoutId} AND seller_id = ${sellerId}`;
 
         // Now, delete the checkout itself
@@ -2695,7 +2700,6 @@ app.delete('/api/checkouts/:checkoutId', authenticateJwt, async (req, res) => {
         `;
 
         if (result.length === 0) {
-            // If no checkout was deleted (already gone or wrong ID/seller)
             console.warn(`Tentativa de excluir checkout não encontrado ou não pertencente ao seller: ${checkoutId}, Seller: ${sellerId}`);
             // Still return success as the end state (checkout doesn't exist) is achieved
         }
