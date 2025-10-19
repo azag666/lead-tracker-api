@@ -1276,13 +1276,11 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
         const { startDate, endDate } = req.query; // Pega as datas da query string
         const hasDateFilter = startDate && endDate && startDate !== '' && endDate !== '';
 
-        // Constrói a consulta SQL inteira dentro de UMA chamada sql``
-        // Esta é a forma correta de lidar com consultas dinâmicas na biblioteca neon
-        const transactions = await sql`
+        // 1. Iniciar a string da query e o array de parâmetros
+        let queryString = `
             SELECT
                 pt.status,
                 pt.pix_value,
-                -- COALESCE para pegar o nome da origem (Bot, Checkout Hospedado, ou padrão)
                 COALESCE(tb.bot_name, hc.config->'content'->>'main_title', 'Checkout Desconhecido') as source_name,
                 pt.provider,
                 pt.created_at
@@ -1291,10 +1289,23 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
             LEFT JOIN pressels p ON c.pressel_id = p.id
             LEFT JOIN telegram_bots tb ON p.bot_id = tb.id
             LEFT JOIN hosted_checkouts hc ON c.checkout_id = hc.id
-            WHERE c.seller_id = ${sellerId}
-            ${hasDateFilter ? sql`AND pt.created_at BETWEEN ${startDate} AND ${endDate}` : sql``} -- Adiciona filtro de data condicionalmente
-            ORDER BY pt.created_at DESC;
+            WHERE c.seller_id = $1
         `;
+        const queryParams = [sellerId]; // $1 é sellerId
+
+        if (hasDateFilter) {
+            // 2. Adicionar o filtro de data à string e os parâmetros ao array
+            queryString += ` AND pt.created_at BETWEEN $2 AND $3`;
+            queryParams.push(startDate); // $2 é startDate
+            queryParams.push(endDate);   // $3 é endDate
+        }
+
+        // 3. Adicionar a ordenação
+        queryString += ` ORDER BY pt.created_at DESC;`;
+
+        // 4. Executar a consulta usando a sintaxe de função sql(query, params)
+        //    Isto é diferente do "sql`...`" (template tag) e é o que resolve o erro.
+        const transactions = await sql(queryString, queryParams);
 
         res.status(200).json(transactions);
     } catch (error) {
@@ -1303,6 +1314,7 @@ app.get('/api/transactions', authenticateJwt, async (req, res) => {
     }
 });
 // ########## FIM DA CORREÇÃO ##########
+
 
 // Generate PIX via API key (typically used by Telegram bot or other integrations)
 app.post('/api/pix/generate', logApiRequest, async (req, res) => {
