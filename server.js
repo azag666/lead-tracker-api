@@ -2916,12 +2916,17 @@ app.delete('/api/checkouts/:checkoutId', authenticateJwt, async (req, res) => {
 app.get('/api/dashboard/campaign-performance', authenticateJwt, async (req, res) => {
     try {
         const sellerId = req.user.id;
-        const { startDate, endDate } = req.query;
+        let { startDate, endDate } = req.query;
 
-        // Validação básica de datas
+        // Validação básica de datas (adiciona 'Z' para garantir UTC)
         if (!startDate || !endDate) {
-            return res.status(400).json({ message: 'startDate e endDate são obrigatórios.' });
+            return res.status(400).json({ message: 'startDate e endDate são obrigatórios (ex: 2023-10-01).' });
         }
+        
+        // Garante que as datas sejam interpretadas corretamente
+        // Adiciona T00:00:00Z e T23:59:59Z para pegar o dia todo
+        startDate = startDate.split('T')[0] + 'T00:00:00Z';
+        endDate = endDate.split('T')[0] + 'T23:59:59Z';
 
         // Busca transações pagas, junta com cliques para pegar a utm_campaign,
         // e agrupa por utm_campaign para somar os totais.
