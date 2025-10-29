@@ -2911,7 +2911,40 @@ app.delete('/api/checkouts/:checkoutId', authenticateJwt, async (req, res) => {
     }
 });
 
-// ########## FIM DAS NOVAS ROTAS ##########
+// ROTA NOVA: /api/dashboard/campaign-performance
+// Esta rota busca as vendas do HotTrack AGRUPADAS por utm_campaign
+app.get('/api/dashboard/campaign-performance', authenticateJwt, async (req, res) => {
+    try {
+        const sellerId = req.user.id;
+        const { startDate, endDate } = req.query;
 
+        // Validação básica de datas
+        if (!startDate || !endDate) {
+            return res.status(400).json({ message: 'startDate e endDate são obrigatórios.' });
+        }
+
+        // Busca transações pagas, junta com cliques para pegar a utm_campaign,
+        // e agrupa por utm_campaign para somar os totais.
+        const campaignPerformance = await sql`
+            SELECT
+                c.utm_campaign,
+                COUNT(pt.id) AS hottrack_sales,
+                COALESCE(SUM(pt.pix_value), 0) AS hottrack_revenue
+            FROM pix_transactions pt
+            JOIN clicks c ON pt.click_id_internal = c.id
+            WHERE c.seller_id = ${sellerId}
+              AND pt.status = 'paid'
+              AND pt.paid_at BETWEEN ${startDate} AND ${endDate}
+              AND c.utm_campaign IS NOT NULL
+            GROUP BY c.utm_campaign;
+        `;
+
+        res.status(200).json(campaignPerformance);
+
+    } catch (error) {
+        console.error("Erro ao buscar performance de campanhas:", error);
+        res.status(500).json({ message: 'Erro interno ao buscar dados de campanha.' });
+    }
+});
 
 module.exports = app; // Export the app for Vercel
