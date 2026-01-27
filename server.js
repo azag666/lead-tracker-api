@@ -142,7 +142,7 @@ async function getSyncPayAuthToken(seller) {
 async function generatePixForProvider(provider, seller, value_cents, host, apiKey, ip_address) {
     let pixData;
     let acquirer = 'Não identificado';
-    const commission_rate = seller.commission_rate || 0.0299; // Default 2.99% commission
+    const commission_rate = seller.commission_rate || 0.0599; // Default 2.99% commission
 
     // Default customer data if not provided
     const clientPayload = {
