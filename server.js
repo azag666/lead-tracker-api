@@ -2182,24 +2182,65 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
             const [pressel] = await sql`SELECT utmify_integration_id FROM pressels WHERE id = ${clickData.pressel_id}`;
             if (pressel) {
                 integrationId = pressel.utmify_integration_id;
+                console.log(`[Utmify] Integração Utmify encontrada na Pressel: ${integrationId}`);
+            } else {
+                console.log(`[Utmify] Pressel ID ${clickData.pressel_id} não encontrada ou sem integração Utmify configurada.`);
             }
-        } else if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
-            // Find Utmify integration linked to the hosted checkout (assuming it's stored in config)
-             const [checkout] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${clickData.checkout_id}`;
-             // Adjust the path according to where you store the utmify_integration_id in the config JSON
-             integrationId = checkout?.config?.tracking?.utmify_integration_id;
-             if (integrationId) {
-                console.log(`[Utmify] Clique originado do Checkout Hospedado ID: ${clickData.checkout_id}. Integração Utmify ID: ${integrationId}`);
-             } else {
-                console.log(`[Utmify] Clique originado do Checkout Hospedado ID: ${clickData.checkout_id}, mas nenhuma integração Utmify configurada.`);
-             }
+        } else if (clickData.checkout_id) {
+            // Verificar se é um checkout antigo (integer) ou hosted_checkout (UUID)
+            const checkoutId = clickData.checkout_id;
+            
+            // Se começa com 'cko_', é um hosted_checkout (UUID)
+            if (typeof checkoutId === 'string' && checkoutId.startsWith('cko_')) {
+                console.log(`[Utmify] Clique originado do Checkout Hospedado ID: ${checkoutId}`);
+                // CORRIGIDO: Usar query SQL com -> para extrair JSON corretamente
+                const [hostedCheckout] = await sql`
+                    SELECT config->'tracking'->>'utmify_integration_id' as utmify_integration_id 
+                    FROM hosted_checkouts 
+                    WHERE id = ${checkoutId}
+                `;
+                
+                if (hostedCheckout?.utmify_integration_id) {
+                    const parsedId = parseInt(hostedCheckout.utmify_integration_id);
+                    if (!isNaN(parsedId)) {
+                        integrationId = parsedId;
+                        console.log(`[Utmify] Integração Utmify encontrada no checkout hospedado: ${integrationId}`);
+                    } else {
+                        console.log(`[Utmify] Valor inválido para utmify_integration_id no checkout hospedado: ${hostedCheckout.utmify_integration_id}`);
+                    }
+                } else {
+                    console.log(`[Utmify] Clique originado do Checkout Hospedado ID: ${checkoutId}, mas nenhuma integração Utmify configurada.`);
+                }
+            } else {
+                // Checkout antigo (integer) - verificar se tem config com utmify_integration_id
+                console.log(`[Utmify] Clique originado do Checkout Antigo ID: ${checkoutId}. Verificando configuração...`);
+                try {
+                    // Tentar buscar de checkouts antigos se tiverem campo config
+                    const [oldCheckout] = await sql`
+                        SELECT config->'tracking'->>'utmify_integration_id' as utmify_integration_id 
+                        FROM checkouts 
+                        WHERE id = ${parseInt(checkoutId)} AND seller_id = ${sellerData.id}
+                    `;
+                    if (oldCheckout?.utmify_integration_id) {
+                        const parsedId = parseInt(oldCheckout.utmify_integration_id);
+                        if (!isNaN(parsedId)) {
+                            integrationId = parsedId;
+                            console.log(`[Utmify] Integração Utmify encontrada no checkout antigo: ${integrationId}`);
+                        }
+                    } else {
+                        console.log(`[Utmify] Checkout antigo ID ${checkoutId} não tem integração Utmify configurada.`);
+                    }
+                } catch (checkoutError) {
+                    console.log(`[Utmify] Erro ao buscar checkout antigo ID ${checkoutId}: ${checkoutError.message}`);
+                }
+            }
         } else {
-             console.log(`[Utmify] Clique ID ${clickData.id} não originado de Pressel ou Checkout Hospedado conhecido.`);
+            console.log(`[Utmify] Clique ID ${clickData.id} não originado de Pressel ou Checkout. pressel_id: ${clickData.pressel_id}, checkout_id: ${clickData.checkout_id}`);
         }
 
-
         if (!integrationId) {
-            console.log(`[Utmify] Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}. Abortando envio.`);
+            console.log(`[Utmify] ⚠ Nenhuma conta Utmify vinculada à origem do clique ${clickData.id}. Abortando envio.`);
+            console.log(`[Utmify] Diagnóstico - pressel_id: ${clickData.pressel_id}, checkout_id: ${clickData.checkout_id}, seller_id: ${sellerData.id}`);
             return;
         }
 
@@ -2218,26 +2259,92 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         const utmifyApiToken = integration.api_token;
         console.log(`[Utmify] Token encontrado. Montando payload...`);
 
+        // Log dos dados do click recebidos para debug
+        console.log(`[Utmify] Dados do click recebidos:`, {
+            id: clickData.id,
+            pressel_id: clickData.pressel_id,
+            checkout_id: clickData.checkout_id,
+            utm_source: clickData.utm_source,
+            utm_campaign: clickData.utm_campaign,
+            utm_medium: clickData.utm_medium,
+            utm_content: clickData.utm_content,
+            utm_term: clickData.utm_term,
+            click_id: clickData.click_id
+        });
+
         // Prepare payload for Utmify API
         const createdAt = (pixData.created_at || new Date()).toISOString().replace('T', ' ').substring(0, 19);
         const approvedDate = status === 'paid' ? (pixData.paid_at || new Date()).toISOString().replace('T', ' ').substring(0, 19) : null;
         const payload = {
             orderId: pixData.provider_transaction_id || `ht_${pixData.id}`, // Use provider ID or internal ID as fallback
-            platform: "HotTrack", paymentMethod: 'pix',
-            status: status, createdAt: createdAt, approvedDate: approvedDate, refundedAt: null,
-            customer: { name: customerData?.name || "Não informado", email: customerData?.email || "naoinformado@email.com", phone: customerData?.phone || null, document: customerData?.document || null, },
-            products: [{ id: productData?.id || "default_product", name: productData?.name || "Produto Digital", planId: null, planName: null, quantity: 1, priceInCents: Math.round(pixData.pix_value * 100) }],
-            trackingParameters: { src: null, sck: null, utm_source: clickData.utm_source, utm_campaign: clickData.utm_campaign, utm_medium: clickData.utm_medium, utm_content: clickData.utm_content, utm_term: clickData.utm_term, click_id: clickData.click_id?.replace('/start ', '') || null }, // Adiciona click_id aqui
-            commission: { totalPriceInCents: Math.round(pixData.pix_value * 100), gatewayFeeInCents: Math.round(pixData.pix_value * 100 * (sellerData.commission_rate || 0.0299)), userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - (sellerData.commission_rate || 0.0299))) },
-            isTest: false // Set to true for testing if needed
+            platform: "HotTrack", 
+            paymentMethod: 'pix',
+            status: status, 
+            createdAt: createdAt, 
+            approvedDate: approvedDate, 
+            refundedAt: null,
+            customer: { 
+                name: customerData?.name || "Não informado", 
+                email: customerData?.email || "naoinformado@email.com", 
+                phone: customerData?.phone || null, 
+                document: customerData?.document || null
+            },
+            products: [{ 
+                id: productData?.id || "default_product", 
+                name: productData?.name || "Produto Digital", 
+                planId: null, 
+                planName: null, 
+                quantity: 1, 
+                priceInCents: Math.round(pixData.pix_value * 100) 
+            }],
+            trackingParameters: { 
+                src: null, 
+                sck: null, 
+                utm_source: clickData.utm_source, 
+                utm_campaign: clickData.utm_campaign, 
+                utm_medium: clickData.utm_medium, 
+                utm_content: clickData.utm_content, 
+                utm_term: clickData.utm_term,
+                click_id: clickData.click_id?.replace('/start ', '') || null
+            },
+            commission: { 
+                totalPriceInCents: Math.round(pixData.pix_value * 100), 
+                gatewayFeeInCents: Math.round(pixData.pix_value * 100 * (sellerData.commission_rate || 0.0500)), 
+                userCommissionInCents: Math.round(pixData.pix_value * 100 * (1 - (sellerData.commission_rate || 0.0500))) 
+            },
+            isTest: false
         };
 
+        // Log do payload completo antes de enviar (apenas em debug)
+        console.log(`[Utmify] Payload completo que será enviado:`, JSON.stringify(payload, null, 2));
+        console.log(`[Utmify] TrackingParameters no payload:`, JSON.stringify(payload.trackingParameters, null, 2));
+
         // Send event to Utmify
-        await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, { headers: { 'x-api-token': utmifyApiToken } });
-        console.log(`[Utmify] SUCESSO: Evento '${status}' do pedido ${payload.orderId} enviado para a conta Utmify (Integração ID: ${integrationId}).`);
+        try {
+            await axios.post('https://api.utmify.com.br/api-credentials/orders', payload, { headers: { 'x-api-token': utmifyApiToken } });
+            console.log(`[Utmify] SUCESSO: Evento '${status}' do pedido ${payload.orderId} enviado para a conta Utmify (Integração ID: ${integrationId}).`);
+        } catch (apiError) {
+            // 429 não é erro crítico - é rate limit esperado
+            if (apiError.response?.status === 429 || apiError.status === 429) {
+                console.warn(`[Utmify] Rate limit 429 ao enviar evento '${status}'. A requisição será retentada automaticamente.`, {
+                    retryAfter: apiError.response?.headers?.['retry-after'] || apiError.response?.headers?.['Retry-After'] || 'desconhecido',
+                    status,
+                    orderId: payload.orderId
+                });
+                // Re-throw para permitir retry se necessário
+                throw apiError;
+            } else {
+                console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, apiError.response?.data || apiError.message);
+                throw apiError;
+            }
+        }
 
     } catch (error) {
-        console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
+        // Se já foi tratado acima, não logar novamente
+        if (error.response?.status !== 429) {
+            console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
+        }
+        // Não re-throw para não quebrar o fluxo principal
     }
 }
 // ROTA META (sendMetaEvent)
@@ -2254,32 +2361,93 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                 JOIN pressel_pixels pp ON pc.id = pp.pixel_config_id
                 WHERE pp.pressel_id = ${clickData.pressel_id} AND pc.seller_id = ${clickData.seller_id}
             `;
-        } else if (clickData.checkout_id && clickData.checkout_id.startsWith('cko_')) {
-            // 2. Fetch pixel from Hosted Checkouts (cko_) config
-            const [hostedCheckout] = await sql`SELECT config FROM hosted_checkouts WHERE id = ${clickData.checkout_id}`;
-            // Extract pixel_id from the JSON config (adjust path if needed)
-            const pixelId = hostedCheckout?.config?.tracking?.pixel_id;
-            if (pixelId) {
-                // Find the full pixel configuration using the pixel_id
-                const [pixelConfig] = await sql`SELECT pixel_id, meta_api_token FROM pixel_configurations WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}`;
-                if (pixelConfig) pixelConfigs.push(pixelConfig);
+            console.log(`[Meta Pixel] Encontrados ${pixelConfigs.length} pixel(s) associados à Pressel ID: ${clickData.pressel_id}`);
+        } else if (clickData.checkout_id) {
+            // Verificar se é um checkout antigo (integer) ou hosted_checkout (UUID)
+            const checkoutId = clickData.checkout_id;
+            
+            // Se começa com 'cko_', é um hosted_checkout (UUID)
+            if (typeof checkoutId === 'string' && checkoutId.startsWith('cko_')) {
+                console.log(`[Meta Pixel] Clique originado do Checkout Hospedado ID: ${checkoutId}`);
+                // CORRIGIDO: Usar query SQL com -> para extrair JSON corretamente
+                const [hostedCheckout] = await sql`
+                    SELECT config->'tracking'->>'pixel_id' as pixel_id 
+                    FROM hosted_checkouts 
+                    WHERE id = ${checkoutId}
+                `;
+                
+                if (hostedCheckout?.pixel_id) {
+                    const pixelId = parseInt(hostedCheckout.pixel_id);
+                    if (!isNaN(pixelId)) {
+                        // Find the full pixel configuration using the pixel_id
+                        const [pixelConfig] = await sql`
+                            SELECT pixel_id, meta_api_token 
+                            FROM pixel_configurations 
+                            WHERE pixel_id = ${pixelId} AND seller_id = ${clickData.seller_id}
+                        `;
+                        if (pixelConfig) {
+                            pixelConfigs.push(pixelConfig);
+                            console.log(`[Meta Pixel] Pixel encontrado no checkout hospedado: ${pixelId}`);
+                        } else {
+                            console.log(`[Meta Pixel] Pixel ID ${pixelId} não encontrado nas configurações do vendedor ${clickData.seller_id}`);
+                        }
+                    } else {
+                        console.log(`[Meta Pixel] Valor inválido para pixel_id no checkout hospedado: ${hostedCheckout.pixel_id}`);
+                    }
+                } else {
+                    console.log(`[Meta Pixel] Clique originado do Checkout Hospedado ID: ${checkoutId}, mas nenhum pixel configurado.`);
+                }
+            } else {
+                // Checkout antigo (integer) - usar JOIN com checkout_pixels
+                console.log(`[Meta Pixel] Clique originado do Checkout Antigo ID: ${checkoutId}`);
+                pixelConfigs = await sql`
+                    SELECT pc.pixel_id, pc.meta_api_token
+                    FROM pixel_configurations pc
+                    JOIN checkout_pixels cp ON pc.id = cp.pixel_config_id
+                    WHERE cp.checkout_id = ${parseInt(checkoutId)}
+                        AND pc.seller_id = ${clickData.seller_id}
+                `;
+                console.log(`[Meta Pixel] Encontrados ${pixelConfigs.length} pixel(s) associados ao Checkout Antigo ID: ${checkoutId}`);
             }
+        } else {
+            console.log(`[Meta Pixel] Clique ID ${clickData.id} não originado de Pressel ou Checkout. pressel_id: ${clickData.pressel_id}, checkout_id: ${clickData.checkout_id}`);
         }
-        // Add handling for old numeric checkouts if necessary
 
         // If no pixels are configured for this source, log and exit
         if (pixelConfigs.length === 0) {
-            console.log(`Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}. Origem: pressel_id=${clickData.pressel_id}, checkout_id=${clickData.checkout_id}`);
+            console.log(`[Meta Pixel] ⚠⚠⚠ PROBLEMA ENCONTRADO: Nenhum pixel configurado para o evento ${eventName} do clique ${clickData.id}.`);
+            console.log(`[Meta Pixel] Diagnóstico - pressel_id: ${clickData.pressel_id}, checkout_id: ${clickData.checkout_id}, seller_id: ${clickData.seller_id}`);
+            if (eventName === 'Purchase' && transactionData.id) {
+                console.error(`[Meta Pixel] [Purchase] Transação ${transactionData.id} NÃO TERÁ evento Purchase enviado para Meta!`);
+            }
             return;
         }
 
         // --- Prepare UserData object for Meta ---
         const userData = {
-            fbp: clickData.fbp || undefined, // Facebook browser ID cookie
-            fbc: clickData.fbc || undefined, // Facebook click ID cookie
             // Use clean click ID as external_id
             external_id: clickData.click_id ? clickData.click_id.replace('/start ', '') : undefined
         };
+
+        // Adicionar fbp apenas se for válido (formato fb.*)
+        if (clickData.fbp && typeof clickData.fbp === 'string') {
+            const trimmedFbp = clickData.fbp.trim();
+            if (trimmedFbp !== '' && 
+                trimmedFbp !== 'NULL' && 
+                trimmedFbp.startsWith('fb.')) {
+                userData.fbp = trimmedFbp;
+            }
+        }
+
+        // Adicionar fbc apenas se for válido (formato fb.*)
+        if (clickData.fbc && typeof clickData.fbc === 'string') {
+            const trimmedFbc = clickData.fbc.trim();
+            if (trimmedFbc !== '' && 
+                trimmedFbc !== 'NULL' && 
+                trimmedFbc.startsWith('fb.')) {
+                userData.fbc = trimmedFbc;
+            }
+        }
 
         // Add IP and User Agent if available and valid
         if (clickData.ip_address && clickData.ip_address !== '::1' && !clickData.ip_address.startsWith('127.0.0.1')) {
@@ -2307,11 +2475,30 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
 
         // Remove any undefined fields from userData
         Object.keys(userData).forEach(key => userData[key] === undefined && delete userData[key]);
+        
+        // Validar dados mínimos antes de enviar
+        const hasMinimalData = userData.client_ip_address || userData.client_user_agent || userData.external_id;
+        if (!hasMinimalData && eventName === 'Purchase') {
+            console.warn(`[Meta Pixel] [Purchase] ⚠ Dados mínimos ausentes (IP/UserAgent/ExternalID). Meta pode rejeitar.`);
+        }
+
+        let pixelsProcessed = 0;
+        let pixelsSuccess = 0;
+        let pixelsFailed = 0;
 
         // --- Loop through each configured pixel and send the event ---
         for (const pixelConfig of pixelConfigs) {
-            if (pixelConfig && pixelConfig.meta_api_token) {
-                const { pixel_id, meta_api_token } = pixelConfig;
+            pixelsProcessed++;
+            
+            if (!pixelConfig || !pixelConfig.meta_api_token) {
+                console.warn(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Token da API não encontrado para o Pixel ID ${pixelConfig?.pixel_id} do vendedor ${clickData.seller_id}.`);
+                pixelsFailed++;
+                continue;
+            }
+
+            const { pixel_id, meta_api_token } = pixelConfig;
+            
+            try {
                 // Generate a unique event ID using transaction/click ID and pixel ID
                 const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
 
@@ -2335,29 +2522,36 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     delete payload.data[0].custom_data.value;
                 }
 
-                try {
-                    // Send event to Meta Conversion API
-                    console.log(`[Meta Pixel] Enviando payload para o pixel ${pixel_id}:`, JSON.stringify(payload, null, 2));
-                    await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
-                    console.log(`Evento '${eventName}' enviado para o Pixel ID ${pixel_id}.`);
+                // Send event to Meta Conversion API
+                await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
+                pixelsSuccess++;
 
-                    // Store the Meta event ID in the transaction record for reference
-                    if (eventName === 'Purchase') {
-                         await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
-                    }
-                } catch (pixelError) {
-                    // Log specific errors from Meta API
-                    console.error(`Erro ao enviar evento '${eventName}' para o Pixel ID ${pixel_id}:`, pixelError.response?.data || pixelError.message);
+                // Store the Meta event ID in the transaction record for reference
+                if (eventName === 'Purchase') {
+                    await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
                 }
-
-            } else {
-                 console.warn(`[Meta Pixel] Token da API não encontrado para o Pixel ID ${pixelConfig?.pixel_id} do vendedor ${clickData.seller_id}.`);
+            } catch (pixelError) {
+                pixelsFailed++;
+                // Log specific errors from Meta API
+                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] ✗ FALHA ao enviar para Meta API:`);
+                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Status:`, pixelError.response?.status);
+                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Erro:`, JSON.stringify(pixelError.response?.data || pixelError.message, null, 2));
             }
         } // End loop through pixels
 
+        // Logar resumo apenas se houver falhas
+        if (pixelsFailed > 0) {
+            console.log(`[Meta Pixel] Resumo: ${pixelsSuccess} sucesso, ${pixelsFailed} falhas de ${pixelConfigs.length} pixel(s) processados.`);
+        }
+
     } catch (error) {
         // Log general errors during event preparation or sending
-        console.error(`Erro geral ao enviar evento '${eventName}' para a Meta. Detalhes:`, error.response?.data || error.message);
+        console.error(`[Meta Pixel] ===== ERRO CRÍTICO NO ENVIO DE ${eventName} =====`);
+        console.error(`[Meta Pixel] Erro:`, error.response?.data || error.message);
+        console.error(`[Meta Pixel] Stack trace completo:`, error.stack);
+        console.error(`[Meta Pixel] Transaction ID: ${transactionData?.id}`);
+        console.error(`[Meta Pixel] Click ID: ${clickData?.id}`);
+        console.error(`[Meta Pixel] ================================================`);
     }
 }
 // CHECK TRANSAÇÕES PENDENTES (checkPendingTransactions)
