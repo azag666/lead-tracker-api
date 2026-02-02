@@ -2326,25 +2326,31 @@ async function sendEventToUtmify(status, clickData, pixData, sellerData, custome
         } catch (apiError) {
             // 429 não é erro crítico - é rate limit esperado
             if (apiError.response?.status === 429 || apiError.status === 429) {
-                console.warn(`[Utmify] Rate limit 429 ao enviar evento '${status}'. A requisição será retentada automaticamente.`, {
-                    retryAfter: apiError.response?.headers?.['retry-after'] || apiError.response?.headers?.['Retry-After'] || 'desconhecido',
+                // Tentar extrair retryAfter de múltiplas fontes
+                let retryAfter = apiError.response?.headers?.['retry-after'] || 
+                               apiError.response?.headers?.['Retry-After'] || 
+                               apiError.retryAfter || 
+                               'desconhecido';
+                
+                console.warn(`[Utmify] Rate limit 429 ao enviar evento '${status}'. Rate limit é esperado e não quebra o fluxo.`, {
+                    retryAfter: retryAfter,
                     status,
                     orderId: payload.orderId
                 });
-                // Re-throw para permitir retry se necessário
-                throw apiError;
+                // NÃO re-throw - rate limit não deve quebrar o fluxo principal
             } else {
                 console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, apiError.response?.data || apiError.message);
-                throw apiError;
+                // NÃO re-throw - erros não devem quebrar o fluxo principal
             }
         }
 
     } catch (error) {
-        // Se já foi tratado acima, não logar novamente
+        // Tratamento de erros gerais (não relacionados ao axios.post)
+        // Se já foi tratado acima (429), não logar novamente
         if (error.response?.status !== 429) {
             console.error(`[Utmify] ERRO CRÍTICO ao enviar evento '${status}':`, error.response?.data || error.message);
         }
-        // Não re-throw para não quebrar o fluxo principal
+        // NÃO re-throw - garantir que o fluxo principal não seja interrompido
     }
 }
 // ROTA META (sendMetaEvent)
@@ -2423,6 +2429,19 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
             return;
         }
 
+        // Para Purchase, verificar se já foi enviado (opcional, não bloquear)
+        if (eventName === 'Purchase' && transactionData.id) {
+            try {
+                const [check] = await sql`SELECT meta_event_id, status FROM pix_transactions WHERE id = ${transactionData.id}`;
+                if (check?.meta_event_id) {
+                    console.log(`[Meta Pixel] [Purchase] Transação ${transactionData.id} já possui meta_event_id: ${check.meta_event_id}. Permitindo reenvio se necessário.`);
+                }
+            } catch (checkError) {
+                // Ignorar erro na verificação, continuar normalmente
+                console.debug(`[Meta Pixel] [Purchase] Erro ao verificar meta_event_id (não crítico):`, checkError.message);
+            }
+        }
+
         // --- Prepare UserData object for Meta ---
         const userData = {
             // Use clean click ID as external_id
@@ -2490,15 +2509,17 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
         for (const pixelConfig of pixelConfigs) {
             pixelsProcessed++;
             
-            if (!pixelConfig || !pixelConfig.meta_api_token) {
-                console.warn(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Token da API não encontrado para o Pixel ID ${pixelConfig?.pixel_id} do vendedor ${clickData.seller_id}.`);
-                pixelsFailed++;
-                continue;
-            }
-
-            const { pixel_id, meta_api_token } = pixelConfig;
-            
+            // Try-catch externo: envolve toda a lógica do pixel para garantir que erros não interrompam o loop
             try {
+                // Validar pixel_id E meta_api_token antes de continuar
+                if (!pixelConfig || !pixelConfig.pixel_id || !pixelConfig.meta_api_token) {
+                    console.warn(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Pixel ID ou token da API não encontrado. pixel_id: ${pixelConfig?.pixel_id}, token: ${!!pixelConfig?.meta_api_token}`);
+                    pixelsFailed++;
+                    continue;
+                }
+
+                const { pixel_id, meta_api_token } = pixelConfig;
+                
                 // Generate a unique event ID using transaction/click ID and pixel ID
                 const event_id = `${eventName}.${transactionData.id || clickData.id}.${pixel_id}`;
 
@@ -2522,20 +2543,31 @@ async function sendMetaEvent(eventName, clickData, transactionData, customerData
                     delete payload.data[0].custom_data.value;
                 }
 
-                // Send event to Meta Conversion API
-                await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
-                pixelsSuccess++;
-
-                // Store the Meta event ID in the transaction record for reference
-                if (eventName === 'Purchase') {
-                    await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+                // Try-catch interno: apenas para axios.post e UPDATE
+                try {
+                    // Send event to Meta Conversion API
+                    await axios.post(`https://graph.facebook.com/v19.0/${pixel_id}/events`, payload, { params: { access_token: meta_api_token } });
+                    
+                    
+                    // Store the Meta event ID in the transaction record for reference (dentro do try-catch interno)
+                    if (eventName === 'Purchase') {
+                        await sql`UPDATE pix_transactions SET meta_event_id = ${event_id} WHERE id = ${transactionData.id}`;
+                    }
+                    
+                    pixelsSuccess++;
+                } catch (apiError) {
+                    // Erro no envio ou UPDATE - logar e continuar para próximo pixel
+                    pixelsFailed++;
+                    console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] ✗ FALHA ao enviar para Meta API:`);
+                    console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Status:`, apiError.response?.status);
+                    console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Erro:`, JSON.stringify(apiError.response?.data || apiError.message, null, 2));
+                    console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Stack:`, apiError.stack);
                 }
-            } catch (pixelError) {
+            } catch (error) {
+                // Erro inesperado ao processar pixel - logar e continuar para próximo pixel
                 pixelsFailed++;
-                // Log specific errors from Meta API
-                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] ✗ FALHA ao enviar para Meta API:`);
-                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Status:`, pixelError.response?.status);
-                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Erro:`, JSON.stringify(pixelError.response?.data || pixelError.message, null, 2));
+                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] ERRO inesperado ao processar pixel:`, error.message);
+                console.error(`[Meta Pixel] [${pixelsProcessed}/${pixelConfigs.length}] Stack:`, error.stack);
             }
         } // End loop through pixels
 
