@@ -1,7 +1,7 @@
-// VERSÃO FINAL CORRIGIDA E OTIMIZADA (Neon Serverless Friendly)
+// VERSÃO FINAL CORRIGIDA E LIMPA (Sem avisos de deprecated)
 const express = require('express');
 const cors = require('cors');
-const { neon, neonConfig } = require('@neondatabase/serverless'); // MODIFICADO
+const { neon, neonConfig } = require('@neondatabase/serverless');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -15,7 +15,7 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 // --- OTIMIZAÇÃO CRÍTICA: Configuração do Neon para Serverless ---
-neonConfig.fetchConnectionCache = true; // Mantém cache da conexão HTTP
+// A opção fetchConnectionCache agora é true por padrão, não precisa definir manualmente.
 // Factory function para criar clientes sob demanda (evita conexão global stale)
 const createSql = () => neon(process.env.DATABASE_URL);
 
