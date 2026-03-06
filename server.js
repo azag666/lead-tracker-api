@@ -2671,31 +2671,33 @@ app.get('/api/dashboard/campaign-performance', authenticateJwt, async (req, res)
         let { startDate, endDate } = req.query;
 
         if (!startDate || !endDate) {
-            return res.status(400).json({ message: 'startDate e endDate são obrigatórios (ex: 2023-10-01).' });
+            return res.status(400).json({ message: 'startDate e endDate são obrigatórios.' });
         }
         
         startDate = startDate.split('T')[0] + 'T00:00:00Z';
         endDate = endDate.split('T')[0] + 'T23:59:59Z';
 
-        const campaignPerformance = await sql`
+        const performance = await sql`
             SELECT
-                c.utm_campaign,
-                COUNT(pt.id) AS hottrack_sales,
-                COALESCE(SUM(pt.pix_value), 0) AS hottrack_revenue
-            FROM pix_transactions pt
-            JOIN clicks c ON pt.click_id_internal = c.id
+                c.utm_campaign as campaign_id,
+                COUNT(DISTINCT c.id) AS total_leads,
+                COUNT(DISTINCT pt.id) AS pix_generated,
+                COUNT(DISTINCT pt.id) FILTER (WHERE pt.status = 'paid') AS pix_paid,
+                COALESCE(SUM(pt.pix_value) FILTER (WHERE pt.status = 'paid'), 0) AS revenue
+            FROM clicks c
+            LEFT JOIN pix_transactions pt ON c.id = pt.click_id_internal
             WHERE c.seller_id = ${sellerId}
-              AND pt.status = 'paid'
-              AND pt.paid_at BETWEEN ${startDate} AND ${endDate}
+              AND c.created_at BETWEEN ${startDate} AND ${endDate}
               AND c.utm_campaign IS NOT NULL
-            GROUP BY c.utm_campaign;
+            GROUP BY c.utm_campaign
+            ORDER BY revenue DESC;
         `;
 
-        res.status(200).json(campaignPerformance);
+        res.status(200).json(performance);
 
     } catch (error) {
-        console.error("Erro ao buscar performance de campanhas:", error);
-        res.status(500).json({ message: 'Erro interno ao buscar dados de campanha.' });
+        console.error("Erro ao buscar performance:", error);
+        res.status(500).json({ message: 'Erro interno ao processar dados.' });
     }
 });
 
