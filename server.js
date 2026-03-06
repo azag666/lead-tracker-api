@@ -58,7 +58,7 @@ if (process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY) {
         process.env.VAPID_PRIVATE_KEY
     );
 }
-let adminSubscription = null;
+global.adminSubscription = null;
 
 // --- CONFIGURAÇÃO ---
 const PUSHINPAY_SPLIT_ACCOUNT_ID = process.env.PUSHINPAY_SPLIT_ACCOUNT_ID;
@@ -2699,6 +2699,26 @@ app.get('/api/dashboard/campaign-performance', authenticateJwt, async (req, res)
         console.error("Erro ao buscar performance:", error);
         res.status(500).json({ message: 'Erro interno ao processar dados.' });
     }
+});
+
+// --- ROTAS PARA PUSH NOTIFICATIONS DOS VENDEDORES ---
+app.get('/api/sellers/vapidPublicKey', authenticateJwt, (req, res) => {
+    if (!process.env.VAPID_PUBLIC_KEY) {
+        return res.status(500).send('VAPID Public Key não configurada no servidor.');
+    }
+    res.type('text/plain').send(process.env.VAPID_PUBLIC_KEY);
+});
+
+app.post('/api/sellers/save-subscription', authenticateJwt, async (req, res) => {
+    const sellerId = req.user.id;
+    const subscription = req.body;
+    
+    // Como os subscritores são limitados no momento a uma variável global,
+    // vamos usar a mesma lógica global por agora (idealmente, salvaria na DB por seller_id)
+    // Se a sua intenção é apenas você usar, isso manterá o sistema compatível com o envio existente.
+    global.adminSubscription = subscription; 
+    console.log(`[Push] Inscrição guardada via dashboard do vendedor ID ${sellerId}`);
+    res.status(201).json({ message: 'Subscrição guardada.' });
 });
 
 module.exports = app;
